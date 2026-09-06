@@ -153,6 +153,41 @@ NVLink, so no network plugin is needed: `NCCL_NET=Socket` fixes it, and
 
 ---
 
+## Cost
+
+No billing export was configured for the project this ran in, so this is an
+engineering estimate, not a billing-verified figure: GPU-hours are computed
+from **step counts ÷ measured throughput**, which is solid, rather than
+reconstructed wall-clock time across several Spot preemptions, which would not
+be. Storage line items are from actual queried sizes. To get the real number
+for your own run, use Console → **Billing → Reports**, filtered by project and
+date range.
+
+| item | basis | estimate |
+|---|---|---|
+| data prep (1×L4, mostly Spot) | ~6-7 h effective | $3-5 |
+| training, buggy run (§ above) | 47,500 steps ÷ ~11 it/s | ~1.2 h compute |
+| training, teacher (corrected) | 400,000 steps ÷ ~11.7 it/s avg | ~9.5 h compute |
+| training, distillation | 200,000 steps ÷ ~17.3 it/s | ~3.2 h compute |
+| training, overhead | NCCL debugging, precompute, eval sweeps, voice testing — all ran on the live 8xH100 VM | ~2-3 h |
+| training, restarts | ~5 preemptions × compile warmup + boot | ~0.5 h |
+| **8xH100 subtotal** | ~16.5 h × ~$32/h Spot | **~$450-650** |
+| data disk (1 TB, pd-balanced) | existed ~2 days before deletion | ~$7 |
+| snapshot (103 GB, confirmed) | ongoing, for future retraining | ~$2.70/month |
+| GCS bucket | peaked ~520 GB briefly mid-run, pruned to 6.4 GB same session | ~$0.15 |
+| network egress | laptop downloads, HF uploads, ~2 GB total | ~$0.25 |
+
+**Total: roughly $460-670, best estimate ≈ $530**, plus **~$3/month** ongoing
+for the snapshot and bucket for as long as they are kept.
+
+The least certain line is the H100 "overhead" — everything on that VM that
+was not a training step, from a first NCCL failure to the checkpoint-picking
+eval sweeps at the end. The buggy run's ~1.2 h is the concrete, avoidable cost
+of the zeroed-encoder bug above; running `preflight.py` first would have made
+that line zero.
+
+---
+
 ## Known limitations
 
 **Ezafe.** Persian does not write the linking `-e` between a noun and its
