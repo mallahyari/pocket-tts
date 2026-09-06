@@ -23,13 +23,65 @@ logger = logging.getLogger("plot_progress")
 app = typer.Typer(pretty_exceptions_show_locals=False)
 
 W, H = 900, 220
-PAD_L, PAD_R, PAD_T, PAD_B = 70, 20, 26, 34
-PANELS = [
-    ("flow_diag", "flow_diag (raw flow-matching MSE)", True),
-    ("flow_loss", "flow_loss (uncertainty-weighted; goes negative by design)", False),
-    ("eos_loss", "eos_loss (length control)", True),
-    ("grad_norm", "grad_norm (clipped at 1.0 when applied)", True),
+PAD_L, PAD_R, PAD_T, PAD_B = 70, 20, 26, 40
+
+# Different training objectives log different metrics -- a from-scratch/LSD run
+# reports flow_diag/flow_loss/eos_loss, a depth-distillation run reports only
+# distill_mse (see training/modules/model.py). Rendering the from-scratch panel
+# list unconditionally against a distillation log produces three "no data"
+# panels and hides the one metric that run actually has. The panel list is
+# built per-file instead, from whichever of these keys are present.
+METRIC_REGISTRY: dict[str, tuple[str, bool]] = {
+    "flow_diag": ("flow_diag (raw flow-matching MSE)", True),
+    "flow_loss": ("flow_loss (uncertainty-weighted; goes negative by design)", False),
+    "eos_loss": ("eos_loss (length control)", True),
+    # LSD's OWN self-distillation term (see training/modules/samplers.py) --
+    # unrelated to the depth/CFG distillation that logs distill_mse. Computed
+    # on only distill_prob (25% by default) of steps, so it is sparser and
+    # noisier than the other panels.
+    "flow_distill": ("flow_distill (LSD's self-distillation term)", True),
+    "distill_mse": ("distill_mse (student vs. teacher backbone activations)", True),
+    # On a scratch/LSD run "loss" = flow_loss + eos_loss_weight * eos_loss, the
+    # actual optimized objective -- a real, distinct metric. On a distillation
+    # run it is set to exactly distill_mse.detach() a second time (see
+    # training/modules/model.py); main() drops it there rather than show the
+    # same curve under two names.
+    "loss": ("loss (combined training objective)", False),
+    "grad_norm": ("grad_norm (clipped at 1.0 when applied)", True),
+}
+PANEL_ORDER = [
+    "flow_diag",
+    "flow_loss",
+    "eos_loss",
+    "flow_distill",
+    "distill_mse",
+    "loss",
+    "grad_norm",
 ]
+
+EXPLANATIONS = {
+    "distill": (
+        "<p class='explain'>This is a <strong>depth-distillation</strong> run: a smaller "
+        "student learns to reproduce a larger teacher's backbone activations, rather than "
+        "being trained on the flow-matching objective directly -- so <code>distill_mse</code> "
+        "is the only loss there is, and it is read the same way as <code>flow_diag</code> on a "
+        "from-scratch run: a falling <em>floor</em> under the noise means the student is still "
+        "converging. WER and speaker similarity typically reach teacher parity by ~40k steps, "
+        "with prosody continuing to settle after that. A rising <code>grad_norm</code> late in "
+        "the schedule is not on its own a sign of trouble -- check it against whether "
+        "<code>distill_mse</code>'s floor is still falling in the same window.</p>"
+    ),
+    "scratch": (
+        "<p class='explain'>This is a <strong>from-scratch</strong> LSD run. Per-step values are "
+        "extremely noisy -- <code>t</code> is redrawn from a lognormal every step, so consecutive "
+        "readings of any metric can differ several-fold; the rolling median (blue) is the line to "
+        "read, not the raw trace (grey). <code>flow_loss</code> is uncertainty-weighted and goes "
+        "<strong>negative by design</strong> once the weighting network learns -- watch "
+        "<code>flow_diag</code> instead, the raw unweighted flow-matching error. The acoustic "
+        "quality transition (where a checkpoint stops sounding flat) typically only lifts off "
+        "around 150-200k steps even once <code>flow_diag</code> has long since plateaued.</p>"
+    ),
+}
 
 
 def read_progress(path: Path) -> tuple[list[dict], list[dict]]:
@@ -49,8 +101,8 @@ def read_progress(path: Path) -> tuple[list[dict], list[dict]]:
                 valid.append(d)
 
     # A resumed run re-appends earlier steps; keep the last value seen per step.
-    def dedupe(rows):
-        by_step = {}
+    def dedupe(rows: list[dict]) -> list[dict]:
+        by_step: dict[int, dict] = {}
         for r in rows:
             by_step[r["step"]] = r
         return [by_step[s] for s in sorted(by_step)]
@@ -85,7 +137,13 @@ def rolling_median(pts: list[tuple[int, float]], window: int) -> list[tuple[int,
     return out
 
 
-def panel(title: str, raw, med, valid, logy: bool) -> str:
+def panel(
+    title: str,
+    raw: list[tuple[int, float]],
+    med: list[tuple[int, float]],
+    valid: list[tuple[int, float]],
+    logy: bool,
+) -> str:
     vals = [v for _, v in med] or [v for _, v in raw]
     if not vals:
         return f'<p class="empty">{title}: no data</p>'
@@ -105,13 +163,13 @@ def panel(title: str, raw, med, valid, logy: bool) -> str:
     pad = (hi - lo) * 0.08
     lo, hi = lo - pad, hi + pad
 
-    def X(s):
+    def X(s: float) -> float:
         return PAD_L + (s - x0) / max(x1 - x0, 1) * (W - PAD_L - PAD_R)
 
-    def Y(v):
+    def Y(v: float) -> float:
         return PAD_T + (hi - f(v)) / (hi - lo) * (H - PAD_T - PAD_B)
 
-    def path(pts, cls):
+    def path(pts: list[tuple[int, float]], cls: str) -> str:
         if not pts:
             return ""
         d = " ".join(
@@ -136,7 +194,13 @@ def panel(title: str, raw, med, valid, logy: bool) -> str:
 
     return (
         f"<h2>{title}{' <em>(log scale)</em>' if use_log else ''}</h2>"
-        f'<svg viewBox="0 0 {W} {H}" role="img" aria-label="{title}">{ticks}'
+        # width/height attributes (not just viewBox) give the SVG a guaranteed
+        # intrinsic aspect ratio; without them "height:auto" in CSS has, in
+        # practice, collapsed to 0 in some rendering contexts, and combined
+        # with overflow:visible that painted the whole chart across the rest
+        # of the page instead of clipping to its own box.
+        f'<svg viewBox="0 0 {W} {H}" width="{W}" height="{H}" '
+        f'preserveAspectRatio="xMidYMid meet" role="img" aria-label="{title}">{ticks}'
         f"{path(raw, 'raw')}{path(med, 'med')}{path(valid, 'valid')}</svg>"
     )
 
@@ -156,8 +220,31 @@ def main(
         raise SystemExit(f"no train entries in {run / 'progress.jsonl'}")
     logger.info(f"{len(train)} train points, {len(valid)} valid points")
 
+    # Which metrics this particular run actually logged. distill_mse without
+    # flow_diag means a depth-distillation run; anything else registered but
+    # present goes in known order, and any further numeric key this file has
+    # that the registry does not know about is still shown rather than
+    # silently dropped, just without curated framing.
+    present = {
+        k for r in train for k, v in r.get("metrics", {}).items() if isinstance(v, (int, float))
+    }
+    if any(isinstance(r.get("grad_norm"), (int, float)) for r in train):
+        present.add("grad_norm")
+
+    is_distill = "distill_mse" in present and "flow_diag" not in present
+    if is_distill:
+        present.discard("loss")  # exact duplicate of distill_mse on this objective
+    explain = EXPLANATIONS["distill" if is_distill else "scratch"]
+
+    ordered = [k for k in PANEL_ORDER if k in present]
+    ordered += sorted(present - set(ordered))
+    if not ordered:
+        raise SystemExit(f"no numeric metrics found in {run / 'progress.jsonl'}")
+    logger.info(f"panels: {', '.join(ordered)}")
+
     body = ""
-    for key, title, logy in PANELS:
+    for key in ordered:
+        title, logy = METRIC_REGISTRY.get(key, (key, True))
         raw = series(train, key)
         body += panel(title, subsample(raw), rolling_median(raw, window), series(valid, key), logy)
 
@@ -166,6 +253,7 @@ def main(
         f"<h1>{run.name}</h1><p class='meta'>step {last['step']:,} &middot; "
         f"lr {last.get('lr', 0):.2e} &middot; {len(train):,} logged points &middot; "
         f"blue = rolling median (window {window}), grey = raw, orange = validation</p>"
+        f"{explain}"
     )
     html = f"""<meta charset="utf-8"><title>{run.name} training progress</title>
 <style>
@@ -180,7 +268,15 @@ def main(
  h2 {{ font-size:14px; font-weight:600; margin:22px 0 2px; }}
  h2 em {{ color:var(--muted); font-weight:400; }}
  .meta {{ color:var(--muted); margin:0 0 8px; }}
- svg {{ width:100%; height:auto; overflow:visible; }}
+ .explain {{ margin:12px 0 20px; padding:10px 14px; border-radius:6px;
+             background:color-mix(in srgb, var(--fg) 5%, transparent);
+             border:1px solid var(--grid); font-size:13px; }}
+ .explain code {{ font-size:12px; }}
+ /* Explicit width/height on the <svg> itself (not just viewBox) give it a
+    guaranteed intrinsic size; do not add overflow:visible back -- combined
+    with any auto-height miscalculation that is what let a chart's raw trace
+    paint across the whole page instead of clipping to its own box. */
+ svg {{ display:block; width:100%; height:auto; }}
  .grid {{ stroke:var(--grid); stroke-width:1; }}
  .raw {{ fill:none; stroke:var(--raw); stroke-width:1; }}
  .med {{ fill:none; stroke:var(--med); stroke-width:2; }}

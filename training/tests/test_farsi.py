@@ -260,7 +260,10 @@ def test_plot_progress_renders_from_a_torn_log(tmp_path):
 
     plot_progress.main(str(run), out=None, window=5)
     html = (run / "progress.html").read_text()
-    assert "<svg" in html and html.count("<h2>") == len(plot_progress.PANELS)
+    # This synthetic log has flow_diag/flow_loss/eos_loss in metrics plus a
+    # top-level grad_norm -- one panel per key actually present, not a fixed
+    # constant (different objectives log different metrics; see PANEL_ORDER).
+    assert "<svg" in html and html.count("<h2>") == 4
 
 
 def test_plot_progress_dedupes_resumed_steps(tmp_path):
@@ -366,3 +369,72 @@ def test_pause_at_punct_does_not_leave_tiny_first_chunk():
     chunks = split_text(text, _fake_count, max_tokens=40, keep_punct_boundaries=True, min_tokens=5)
     assert all(_fake_count(c) >= 5 for c in chunks[:-1]), chunks
     assert " ".join(chunks).split() == text.split()
+
+
+def test_plot_progress_detects_distillation_metrics(tmp_path):
+    """A depth-distillation run logs distill_mse, not flow_diag/flow_loss/
+    eos_loss. Rendering the from-scratch panel list against it used to produce
+    three "no data" placeholders and hide the one metric the run actually has.
+    """
+    import json
+
+    from training.farsi import plot_progress
+
+    run = tmp_path / "run"
+    run.mkdir()
+    lines = [
+        json.dumps(
+            {
+                "type": "train",
+                "step": s,
+                "lr": 4e-4,
+                "grad_norm": 0.01,
+                # "loss" duplicates distill_mse exactly on this objective
+                # (see training/modules/model.py) and must not get its own panel.
+                "metrics": {"distill_mse": 0.05, "loss": 0.05},
+            }
+        )
+        for s in range(0, 1000, 50)
+    ]
+    (run / "progress.jsonl").write_text("\n".join(lines))
+
+    plot_progress.main(str(run), out=None, window=5)
+    html = (run / "progress.html").read_text()
+    assert "no data" not in html
+    assert html.count("<h2>") == 2  # distill_mse, grad_norm -- not "loss" too
+    assert "depth-distillation" in html
+
+
+def test_plot_progress_svg_has_no_unbounded_overflow(tmp_path):
+    """A chart's raw trace once painted across the whole page instead of
+    clipping to its own box: overflow:visible on an svg sized only by
+    height:auto, with no width/height attributes to guarantee its box. Both
+    must hold for every panel, on any run.
+    """
+    import json
+
+    from training.farsi import plot_progress
+
+    run = tmp_path / "run"
+    run.mkdir()
+    lines = [
+        json.dumps({"type": "train", "step": s, "grad_norm": 0.5, "metrics": {"flow_diag": 1.0}})
+        for s in range(0, 500, 50)
+    ]
+    (run / "progress.jsonl").write_text("\n".join(lines))
+
+    plot_progress.main(str(run), out=None, window=3)
+    html = (run / "progress.html").read_text()
+
+    import re
+
+    # Strip CSS/HTML comments before searching: the fix is explained in one,
+    # and that explanation names the very string it forbids.
+    without_comments = re.sub(r"/\*.*?\*/", "", html, flags=re.S)
+    assert "overflow:visible" not in without_comments.replace(" ", "")
+    assert "overflow: visible" not in without_comments
+
+    svg_tags = re.findall(r"<svg[^>]*>", without_comments)
+    assert svg_tags, "expected at least one rendered chart"
+    for tag in svg_tags:
+        assert 'width="900"' in tag and 'height="220"' in tag
