@@ -8,7 +8,7 @@ We're happy to feature community-trained models in the [list of community-traine
 
 First, the minimal setup necessary to train a simple model – we'll talk about each of these steps in more detail below.
 This will give you a 24-layer model trained on 200h of English data.
-It won't be best model in the world, but it'll produce intelligible speech, and demonstrate the training process.
+It won't be the best model in the world, but it'll produce intelligible speech, and demonstrate the training process.
 You can later re-run with 2000h of data to get results on par with the official model.
 
 Downloading and preparing data (around 15 GB):
@@ -20,28 +20,28 @@ uv run training/scripts/prepare_data.py --hours 200
 Training:
 
 ```bash
-uv run training/train.py training/configs/lsd_scratch.yaml
+uv run training/train.py training/configs/scratch.yaml
 ```
 
 Generate samples:
 
 ```bash
 uv run pocket-tts generate --config pocket_tts/config/english.yaml \
-    --checkpoint runs/lsd_scratch/checkpoint_00050000.pt \
+    --checkpoint runs/scratch/checkpoint_00050000.pt \
     --voice some_speaker.wav --text "Hello there."
 ```
 
 Congratulations, you've trained your first Pocket TTS!
 
 With the 200 hours that we used, you should get intelligible speech, but to get a model that's on par with the production Pocket TTS, you'll want 2000 hours or more.
-You can try to rerun with `--hours 2000` and edit `lsd_scratch.yaml` to point to the new manifest.
+You can try to rerun with `--hours 2000` and edit `scratch.yaml` to point to the new manifest.
 
 Now in detail:
 
 ## Installation
 
 Requirements:
-- Linux - we don't provide official support for Windows/Mac training, but will accept bugfix PRs
+- Linux - we don't provide official support for Windows/Mac training, as we don't have the hardware or time to support those platforms.
 - One NVIDIA GPU (the default batch size wants ~56 GB; a consumer GPU runs `batch_size: 16` with
   `grad_accum_steps: 4` in ~16 GB); you can use more GPUs to train faster
 - Python 3.10+ and [uv](https://docs.astral.sh/uv/)
@@ -132,28 +132,29 @@ Here are some common issues and solutions:
 - As mentioned, you should aim for 1000+ hours of data, 100 hours is a minimum.
 - If the TTS is good acoustically but doesn't follow the transcript: it means your transcripts are inaccurate. Prefer hand-transcribed data over automatically-transcribed if possible.
 - If your outputs sound noisy/low-quality: This is the acoustic quality of your voice prompt, and the model learns to mimic it. This can be solved at inference time by using a "clean" voice prompt. (You could also train the model to clean up the voice automatically, but this is out of the scope of this README.)
-- Your model doesn't do well on a certain kind of voice (e.g. high-pitched, or a specific accent): it means those voices are under-represented in the dataset
+- Your model doesn't do well on a certain kind of voice (e.g. high-pitched, or a specific accent): it means those voices are under-represented in the dataset.
 - If your model is generating speech that cuts off part of the first or last word: the issue is probably with your alignment.
-- If your model sounds like somebody is reading from a book: can be due to the training dataset (audiobooks like LibriVox), the voice prompt, or both.
-
-For a corpus in another language, see
-[Non-English training](#non-english-training): the aligner and the tokenizer
-both have to be swapped for that language.
+- If your model sounds like somebody is reading from a book: this can be due to the training dataset (audiobooks like LibriVox), the voice prompt, or both.
 
 ## Train
 
 ```bash
 # If you have a single GPU:
-uv run training/train.py training/configs/lsd_scratch.yaml
+uv run training/train.py training/configs/scratch.yaml
 # If you have multiple GPUs, launch using Torchrun:
-uv run torchrun --nproc-per-node 8 training/train.py training/configs/lsd_scratch.yaml
+uv run torchrun --nproc-per-node 8 training/train.py training/configs/scratch.yaml
 ```
 
 The training is configured using a single YAML file.
 The official Pocket TTS training happens in two steps, corresponding to the two YAMLs we provide:
-- `lsd_scratch.yaml`: trains a 24-layer teacher from scratch
-- `lsd_depth_distill.yaml`: distils that teacher into a 6-layer student. This also bakes in classifier-free guidance (CFG), see [paper](https://arxiv.org/abs/2207.12598) or [explanation](https://youtu.be/iv-5mZ_9CPY?t=1797).
+- `scratch.yaml`: trains a 24-layer teacher from scratch
+- `depth_distill.yaml`: distills that teacher into a 6-layer student. This also bakes in classifier-free guidance (CFG), see [paper](https://arxiv.org/abs/2207.12598) or [explanation](https://youtu.be/iv-5mZ_9CPY?t=1797).
 
+If you want to finetune from the English teacher model, we provide two more configs:
+- `finetune.yaml`: continues from the pretrained English teacher, useful if you want to finetune on more data in the same language (new voices, a new domain).
+- `finetune_language.yaml`: continues from the pretrained English teacher, but initialises the text embedding fresh (the text tokenizer differs). On Czech, it reached the same WER as a scratch run about 2.5x sooner.
+
+The two configs above will give you a teacher that you can then distil down to 6 layers.
 Training the model in two steps like this works better than training a 6-layer model from scratch.
 
 ### Reproducing our results
@@ -165,19 +166,28 @@ If you train on 2k hours of HiFiTTS-2 and batch size 64, this is the metrics pro
 
 See [Evaluate](#Evaluate) for more info about the metrics.
 
-Regarding timing, this is how long training takes (all with effective batch size 64):
+Regarding timing: the first run precomputes Mimi latents for the train
+manifest (once, using all GPUs; validation always encodes audio directly),
+then trains from them. On 2000 h of HiFiTTS-2, effective batch size 64:
 
-| GPUs | per-GPU batch | steps/s | peak VRAM/GPU | to 200k | to 400k |
-|---|---|---|---|---|---|
-| 1 x L4-23GB | 16 x4 | 0.35 | 15.9 GiB | ~158 h | ~315 h |
-| 1 x L40S-46GB | 64 | 0.77 | 42.0 GiB | ~72 h | ~144 h |
-| 1 x H100-80GB | 64 | 1.91 | 55.6 GiB | ~29 h | ~58 h |
-| 2 x H100-80GB | 32 | 3.35 | 32.6 GiB | ~17 h | ~33 h |
-| 4 x H100-80GB | 16 | 5.25 | 20.1 GiB | ~11 h | ~21 h |
-| 8 x H100-80GB | 8 | 6.85 | 14.8 GiB | ~8 h | ~16 h |
+| GPUs | per-GPU batch | precompute (once) | steps/s | peak VRAM/GPU | to 200k | to 400k |
+|---|---|---|---|---|---|---|
+| 1 x H100-80GB | 64 | ~50 min | 5.05 | 41.5 GiB | ~11 h | ~22 h |
+| 2 x H100-80GB | 32 | ~25 min | 7.97 | 24.9 GiB | ~7 h | ~14 h |
+| 4 x H100-80GB | 16 | ~15 min | 9.79 | 17.2 GiB | ~5.7 h | ~11.4 h |
+| 8 x H100-80GB | 8 | ~10 min | 10.60 | 15.5 GiB | ~5.2 h | ~10.5 h |
 
-Scaling falls off because the per-GPU batch shrinks, not because of
-communication. Distillation adds ~3 h on 8 H100 GPUs.
+Precompute stores ~6 GB of latents per 1000 h of audio next to the manifest.
+`data.precompute: false` skips the precomputing, which will start training
+immediately but at slower speeds.
+
+And for the distillation step (`depth_distill.yaml`), here is the speed you
+can expect:
+
+| GPUs | per-GPU batch | steps/s | peak VRAM/GPU | 200k steps |
+|---|---|---|---|---|
+| 1 x H100 | 64 | 7.61 | 9.7 GiB | ~7.3 h |
+| 8 x H100 | 8 | 23.40 | 5.7 GiB | ~2.4 h |
 
 ### Training format
 
@@ -197,10 +207,10 @@ By default, the training saves:
     `-- ...
 ```
 
-`model.safetensors`: different than the `checkpoint_<N>.pt` checkpoints in two ways.
+`model.safetensors`: different from the `checkpoint_<N>.pt` checkpoints in two ways.
 One, it uses the format that the inference code (in the repo root) expects.
 And two, it's an exponential moving average of the model weights, averaged over training timesteps.
-EMA'ing the weights is a common technique to squeeze out a bit more performance out of models see e.g. [this](https://arxiv.org/html/2411.18704v1).
+EMA'ing the weights is a common technique to squeeze a bit more performance out of models, see e.g. [this](https://arxiv.org/html/2411.18704v1).
 
 `progress.jsonl`: We do not support experiment trackers like Tensorboard or Weights and Biases
 because it's easy to ask your coding agent to add support for whatever you like
@@ -222,7 +232,7 @@ In our example, we use the LibriSpeech dataset for evaluation.
 Run:
 
 ```bash
-uv run training/eval/librispeech.py runs/lsd_scratch \
+uv run training/eval/librispeech.py runs/scratch \
     --librispeech-root /data/LibriSpeech/test-clean --use-ema
 ```
 
@@ -260,7 +270,7 @@ To generate audio, you can use the usual `pocket-tts generate` command and pass 
 
 ```bash
 uv run pocket-tts generate --config my_config.yaml \
-    --checkpoint runs/lsd_ft/checkpoint_00124000.pt \
+    --checkpoint runs/finetune/checkpoint_00124000.pt \
     --voice voice.wav --text "The quick brown fox jumps over the lazy dog."
 ```
 
@@ -268,7 +278,7 @@ Or, from Python:
 
 ```python
 model = TTSModel.load_model(
-    config="my_config.yaml", checkpoint="runs/lsd_ft/checkpoint_00124000.pt"
+    config="my_config.yaml", checkpoint="runs/finetune/checkpoint_00124000.pt"
 )
 state = model.get_state_for_audio_prompt("voice.wav")
 audio = model.generate_audio(state, "The quick brown fox jumps over the lazy dog.")

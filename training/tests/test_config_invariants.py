@@ -6,6 +6,7 @@ and a teacher path pointing at an architecture the distill step cannot load.
 """
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -13,8 +14,8 @@ from training.args import TrainArgs, _from_dict, load_args
 from training.modules.builders import load_model_config
 
 CONFIGS = Path(__file__).resolve().parents[1] / "configs"
-SCRATCH = CONFIGS / "lsd_scratch.yaml"
-DISTILL = CONFIGS / "lsd_depth_distill.yaml"
+SCRATCH = CONFIGS / "scratch.yaml"
+DISTILL = CONFIGS / "depth_distill.yaml"
 
 # Below 64 rows per optimizer step the acoustic-quality transition arrives late
 # or not at all, and 400k steps is where expressivity settles (see README).
@@ -30,7 +31,7 @@ def test_config_parses(path: Path):
 def test_scratch_reaches_the_effective_batch_floor():
     args = load_args(SCRATCH)
     assert args.batch_size * args.grad_accum_steps >= MIN_EFFECTIVE_BATCH, (
-        "lsd_scratch must reach 64 rows per step on a single GPU: "
+        "scratch must reach 64 rows per step on a single GPU: "
         f"{args.batch_size} x {args.grad_accum_steps}"
     )
 
@@ -72,8 +73,9 @@ class TestArgValidation:
 
     def test_zero_frequencies_are_rejected(self):
         for field in ("valid_freq", "ckpt_freq", "log_freq"):
+            kwargs: dict[str, Any] = {field: 0}
             with pytest.raises(ValueError, match=field):
-                TrainArgs(**{field: 0})
+                TrainArgs(**kwargs)
 
     def test_distillation_without_a_teacher_is_rejected(self):
         with pytest.raises(ValueError, match="teacher"):

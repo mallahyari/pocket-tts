@@ -12,6 +12,7 @@ import torch
 import yaml
 from torch import nn
 
+from pocket_tts.models.flow_lm import FlowLMModel
 from pocket_tts.models.mimi import MimiModel, build_mimi
 from pocket_tts.models.tts_model import TTSModel
 from pocket_tts.modules.mlp import SimpleMLPAdaLN
@@ -27,7 +28,7 @@ from .utils import disable_grad, dit_init, gaussian_init, stamp_state_names
 logger = logging.getLogger(__name__)
 
 
-def load_model_config(path: str, overrides: dict[str, tp.Any]):
+def load_model_config(path: str, overrides: dict[str, tp.Any]) -> Config:
     """A pocket-tts model config with dotted-path fields replaced.
 
     Lets one released config serve as the architecture for any variant of it
@@ -50,7 +51,7 @@ def load_model_config(path: str, overrides: dict[str, tp.Any]):
     return Config(**raw)
 
 
-def attach_distillation(model: TrainableTTS, flow_lm: nn.Module, args: TrainArgs) -> None:
+def attach_distillation(model: TrainableTTS, flow_lm: FlowLMModel, args: TrainArgs):
     """Give `model` a frozen teacher and freeze what distillation must not move.
 
     Two shapes share this path: a separately trained (usually deeper) teacher
@@ -124,7 +125,7 @@ def attach_distillation(model: TrainableTTS, flow_lm: nn.Module, args: TrainArgs
     disable_grad(model.flow)
 
 
-def build_models(args: TrainArgs) -> tuple[TrainableTTS, MimiModel, tp.Any]:
+def build_models(args: TrainArgs) -> tuple[TrainableTTS, MimiModel, Config]:
     """Build (trainable model, frozen mimi, pocket config) from a pocket-tts config."""
     config = load_model_config(args.model_config, args.model_overrides)
     tts_model = TTSModel._from_pydantic_config(
@@ -166,6 +167,11 @@ def build_models(args: TrainArgs) -> tuple[TrainableTTS, MimiModel, tp.Any]:
         flow_state = {
             k.removeprefix("flow_lm."): v for k, v in state.items() if k.startswith("flow_lm.")
         }
+        dropped: list[str] = []
+        if args.reset_text_embedding:
+            dropped = [k for k in flow_state if k.startswith("conditioner.embed.")]
+            logger.info("starting the text embedding from scratch: %s", dropped)
+            flow_state = {k: v for k, v in flow_state.items() if k not in dropped}
         if flow.num_time_conds != 2:
             flow_state = {k: v for k, v in flow_state.items() if not k.startswith("flow_net.")}
             missing, unexpected = flow_lm.load_state_dict(flow_state, strict=False)
@@ -176,7 +182,9 @@ def build_models(args: TrainArgs) -> tuple[TrainableTTS, MimiModel, tp.Any]:
             )
             dit_init(flow_lm.flow_net)
         else:
-            flow_lm.load_state_dict(flow_state, strict=True)
+            missing, unexpected = flow_lm.load_state_dict(flow_state, strict=not dropped)
+            assert not unexpected, unexpected
+            assert set(missing) <= set(dropped), missing
     else:
         gaussian_init(flow_lm.transformer)
         gaussian_init(flow_lm.input_linear)
