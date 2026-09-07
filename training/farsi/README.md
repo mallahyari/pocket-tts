@@ -591,6 +591,10 @@ uvx pocket-tts generate --config hf://<your_user>/<your_repo>/farsi.yaml \
     --voice voice.wav --text "سلام، حال شما چطور است؟"
 ```
 
+For a point-and-click alternative, [`space/`](space/) has a small Gradio app
+(same chunking, same normalization) that runs locally — see
+[`space/README.md`](space/README.md).
+
 Kyutai will feature community models that cover new languages — Farsi is not
 one of the six official languages, so a working model is exactly what they ask
 for in [`../README.md`](../README.md#models-trained-by-the-community). Open a PR.

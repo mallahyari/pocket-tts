@@ -1,0 +1,4 @@
+pocket-tts
+soundfile
+sphn
+gradio
