@@ -79,6 +79,7 @@ test_en_audio_4000.model
 profile_output*
 *.safetensors
 *.wav
+!training/farsi/examples/*.wav
 *.model
 *.pt
 
