@@ -593,7 +593,9 @@ uvx pocket-tts generate --config hf://<your_user>/<your_repo>/farsi.yaml \
 
 For a point-and-click alternative, [`space/`](space/) has a small Gradio app
 (same chunking, same normalization) that runs locally — see
-[`space/README.md`](space/README.md).
+[`space/README.md`](space/README.md). Or skip running anything and just listen:
+[`examples/`](examples/) has five clips generated with the released model and
+default settings.
 
 Kyutai will feature community models that cover new languages — Farsi is not
 one of the six official languages, so a working model is exactly what they ask

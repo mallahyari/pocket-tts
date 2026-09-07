@@ -6,7 +6,8 @@
 > everything used to build it — data prep, training, distillation, evaluation.
 > Start with [`training/farsi/RUNBOOK.md`](training/farsi/RUNBOOK.md) for
 > step-by-step instructions, [`training/farsi/RESULTS.md`](training/farsi/RESULTS.md)
-> for the numbers and what was learned, or try the model directly:
+> for the numbers and what was learned, [`training/farsi/examples/`](training/farsi/examples/)
+> to listen to it first, or try the model directly:
 > [🤗 pocket-tts-farsi](https://huggingface.co/mehdi-hf/pocket-tts-farsi).
 
 <img width="1446" height="622" alt="pocket-tts-logo-v2-transparent" src="https://github.com/user-attachments/assets/637b5ed6-831f-4023-9b4c-741be21ab238" />
