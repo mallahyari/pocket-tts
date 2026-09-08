@@ -22,6 +22,7 @@ lives next to it:
 | [`RUNBOOK.md`](RUNBOOK.md) | **step-by-step**: what to run, in what order, on what machine, at what cost |
 | [`normalize_fa.py`](normalize_fa.py) | Persian text normalization: letter folding, diacritics, ZWNJ, digits → words |
 | [`prepare_data_fa.py`](prepare_data_fa.py) | download 4 public Persian corpora → filtered, aligned manifests + tokenizer |
+| [`DATASET_SURVEY.md`](DATASET_SURVEY.md) | four more public datasets evaluated as fine-tune candidates: license, format, and measured transcript accuracy for each |
 | [`eval_fa.py`](eval_fa.py) | Farsi WER / speaker similarity / UTMOS, plus the ASR's own error floor |
 | [`configs/`](configs/) | model configs and the three training recipes |
 | [`gcp/run_training.sh`](gcp/run_training.sh) | preemption-proof launcher for Spot VMs |

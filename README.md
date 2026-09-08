@@ -36,6 +36,14 @@ uv run farsi_tts.py --text "<one row from the table above>"
 repo — see [`training/farsi/README.md`](training/farsi/README.md) or the
 [model card](https://huggingface.co/mehdi-hf/pocket-tts-farsi) to get it.)
 
+**Looking for more Persian training data?** We surveyed four more public datasets as
+candidates for a fine-tune — one turned out to be sung music mislabeled as speech, one
+has a license that rules it out despite being the best raw audio we found, one is
+noisier than what's already in the model, and one looks genuinely promising. Full
+writeup, including the license checks, the ASR-based accuracy measurements, and a real
+test-methodology bug we caught and fixed along the way, is in
+[`training/farsi/DATASET_SURVEY.md`](training/farsi/DATASET_SURVEY.md).
+
 <img width="1446" height="622" alt="pocket-tts-logo-v2-transparent" src="https://github.com/user-attachments/assets/637b5ed6-831f-4023-9b4c-741be21ab238" />
 
 A lightweight text-to-speech (TTS) application designed to run efficiently on CPUs.
