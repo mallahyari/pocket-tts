@@ -7,6 +7,8 @@ and that the held-out split is actually held out.
 """
 
 import json
+from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -564,3 +566,76 @@ def test_high_wer_with_no_helpful_shift_blames_the_transcripts() -> None:
 
 def test_no_usable_windows_is_reported_rather_than_crashing() -> None:
     assert "cannot judge" in _verdict({0.0: (0, 0, 5)}, [0.0])
+
+
+# --------------------------------------------------------------------------
+# prep_v2 shard split/merge: phonemizing across GPUs must not reorder the corpus
+# --------------------------------------------------------------------------
+
+
+def _prep_v2() -> ModuleType:
+    import importlib.util
+    import sys
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / "farsi" / "v2" / "prep_v2.py"
+    spec = importlib.util.spec_from_file_location("prep_v2", path)
+    mod = importlib.util.module_from_spec(spec)
+    # @dataclass resolves its own module out of sys.modules; without this the
+    # decorator sees None there and dies before the file finishes loading.
+    sys.modules["prep_v2"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_sharded_phonemize_reproduces_a_single_pass(tmp_path: Path) -> None:
+    """Split, phonemize each slice, concatenate: byte-identical to one pass.
+
+    Latents are index-keyed to their manifest, so a reordered corpus would pair
+    every utterance with the wrong audio -- silently, and only visible as a
+    model that never learns.
+    """
+    prep = _prep_v2()
+    src = tmp_path / "corpus.jsonl"
+    src.write_text("".join(f'{{"i": {i}}}\n' for i in range(97)))
+    dst = tmp_path / "corpus_ph.jsonl"
+
+    pairs = prep.split_manifest(src, dst, 8)
+    for chunk, part in pairs:  # stand in for the G2P process
+        part.write_text(chunk.read_text())
+    prep.concat_parts(pairs, dst)
+
+    assert dst.read_text() == src.read_text()
+
+
+def test_sharding_covers_every_row_exactly_once(tmp_path: Path) -> None:
+    prep = _prep_v2()
+    src = tmp_path / "corpus.jsonl"
+    src.write_text("".join(f"row{i}\n" for i in range(1000)))
+    pairs = prep.split_manifest(src, tmp_path / "out.jsonl", 7)
+    seen = [line for chunk, _ in pairs for line in chunk.read_text().splitlines()]
+    assert seen == [f"row{i}" for i in range(1000)]
+
+
+def test_shard_pieces_are_cleaned_up(tmp_path: Path) -> None:
+    prep = _prep_v2()
+    src = tmp_path / "corpus.jsonl"
+    src.write_text("a\nb\nc\nd\n")
+    dst = tmp_path / "out.jsonl"
+    pairs = prep.split_manifest(src, dst, 2)
+    for chunk, part in pairs:
+        part.write_text(chunk.read_text())
+    prep.concat_parts(pairs, dst)
+    assert not any(chunk.exists() or part.exists() for chunk, part in pairs)
+
+
+def test_fewer_rows_than_shards_still_round_trips(tmp_path: Path) -> None:
+    prep = _prep_v2()
+    src = tmp_path / "corpus.jsonl"
+    src.write_text("only\n")
+    dst = tmp_path / "out.jsonl"
+    pairs = prep.split_manifest(src, dst, 8)
+    for chunk, part in pairs:
+        part.write_text(chunk.read_text())
+    prep.concat_parts(pairs, dst)
+    assert dst.read_text() == "only\n"

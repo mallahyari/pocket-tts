@@ -245,10 +245,71 @@ def step_merge(p: Paths) -> None:
     typer.echo(f"    wrote {p.merged.name}: {total:,} rows")
 
 
-def step_phonemize(p: Paths, batch: int) -> None:
+# Below this, splitting and concatenating costs more than it saves.
+SHARD_MIN_ROWS = 10_000
+
+
+def split_manifest(src: Path, dst: Path, shards: int) -> list[tuple[Path, Path]]:
+    """Cut `src` into `shards` contiguous chunks, paired with their output paths.
+
+    Contiguous and in order, so concatenating the outputs in this same order
+    reproduces exactly what one pass over `src` would have written.
+    """
+    lines = src.open().readlines()
+    per = (len(lines) + shards - 1) // shards
+    pairs = []
+    for i in range(shards):
+        chunk = src.with_suffix(f".phchunk{i}")
+        chunk.write_text("".join(lines[i * per : (i + 1) * per]))
+        pairs.append((chunk, dst.with_suffix(f".phpart{i}")))
+    return pairs
+
+
+def concat_parts(pairs: list[tuple[Path, Path]], dst: Path) -> None:
+    """Join the shard outputs back into `dst` and clean up the pieces."""
+    with dst.open("w") as f:
+        for chunk, part in pairs:
+            f.write(part.read_text())
+            chunk.unlink()
+            part.unlink()
+
+
+def phonemize_sharded(src: Path, dst: Path, batch: int, shards: int) -> None:
+    """One G2P process per GPU over a contiguous slice of `src`.
+
+    G2P here is five-beam search over a byte-level T5. On a single card the
+    merged corpus needs about seven hours while every other card sits idle,
+    which is most of a prep session spent on the cheapest step in it. Each
+    slice resumes independently, since phonemize_manifest.py appends and skips
+    whatever its own output already holds.
+    """
+    pairs = split_manifest(src, dst, shards)
+    procs = [
+        subprocess.Popen(
+            [
+                "env", f"CUDA_VISIBLE_DEVICES={i}",
+                "uv", "run", str(V2 / "phonemize_manifest.py"),
+                "--manifest", str(chunk), "--out", str(part), "--batch-size", str(batch),
+            ],
+            cwd=REPO,
+        )
+        for i, (chunk, part) in enumerate(pairs)
+    ]
+    if [i for i, proc in enumerate(procs) if proc.wait() != 0]:
+        typer.echo("    a phonemize shard failed — rerun to resume the rest")
+        raise typer.Exit(1)
+    concat_parts(pairs, dst)
+
+
+def step_phonemize(p: Paths, batch: int, gpus: int) -> None:
     for src, dst in ((p.merged, p.merged_ph), (p.v1_valid, p.valid_ph)):
         if dst.exists() and count_lines(dst) >= count_lines(src):
             typer.echo(f"    {dst.name} complete — skipping")
+            continue
+        rows = count_lines(src)
+        if gpus > 1 and rows >= SHARD_MIN_ROWS:
+            typer.echo(f"    {src.name}: {rows:,} rows across {gpus} GPUs")
+            phonemize_sharded(src, dst, batch, gpus)
             continue
         if run_script(
             V2 / "phonemize_manifest.py",
@@ -362,7 +423,7 @@ def main(
         elif name == "merge":
             step_merge(p)
         elif name == "phonemize":
-            step_phonemize(p, phonemize_batch)
+            step_phonemize(p, phonemize_batch, gpus)
         elif name == "tokenizer":
             step_tokenizer(p)
         elif name == "latents":
