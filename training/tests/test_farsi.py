@@ -10,7 +10,7 @@ import json
 
 import pytest
 
-from training.farsi import eval_fa, prepare_data_fa
+from training.farsi import eval_fa, prepare_data_fa, synthesize
 from training.farsi.normalize_fa import (
     ALIGNER_ALPHABET,
     ALLOWED,
@@ -438,3 +438,82 @@ def test_plot_progress_svg_has_no_unbounded_overflow(tmp_path):
     assert svg_tags, "expected at least one rendered chart"
     for tag in svg_tags:
         assert 'width="900"' in tag and 'height="220"' in tag
+
+
+# --------------------------------------------------------------------------
+# generate_chunk: recovery from runaway (no-EOS) generations
+# --------------------------------------------------------------------------
+
+
+class _FakeConditioner:
+    """prepare() only needs to report a token count for the cap estimate."""
+
+    def prepare(self, text: str) -> "torch.Tensor":
+        import torch
+
+        return torch.zeros(1, len(text.split()))
+
+
+class _FakeModel:
+    """Returns audio of a length dictated by `plan`, so cap-hits are scriptable.
+
+    `plan` maps a chunk's word count to the list of durations (as a fraction of
+    that chunk's cap) it returns on successive calls.
+    """
+
+    _TOKENS_PER_SECOND_ESTIMATE = 3.0
+    _GEN_SECONDS_PADDING = 2.0
+
+    def __init__(self, plan: dict[int, list[float]], sample_rate: int = 100) -> None:
+        self.plan = plan
+        self.sample_rate = sample_rate
+        self.calls: list[str] = []
+        self.flow_lm = type("F", (), {"conditioner": _FakeConditioner()})()
+        self.config = type("C", (), {"mimi": type("M", (), {"frame_rate": 12.5})()})()
+        self.mimi = type("Mi", (), {"sample_rate": sample_rate})()
+
+    def generate_audio(self, state: object, text: str, frames_after_eos: int | None = None) -> "np.ndarray":
+        import numpy as np
+
+        self.calls.append(text)
+        n_words = len(text.split())
+        ratios = self.plan.get(n_words, [0.5])
+        ratio = ratios[min(len([c for c in self.calls if c == text]) - 1, len(ratios) - 1)]
+        cap = synthesize._cap_seconds(self, text)
+        return np.zeros(int(ratio * cap * self.sample_rate), dtype="float32")
+
+
+def test_generate_chunk_returns_a_healthy_generation_untouched() -> None:
+    model = _FakeModel({4: [0.5]})
+    out = synthesize.generate_chunk(model, None, "a b c d", sample_rate=100)
+    assert len(model.calls) == 1, "a healthy chunk must not be retried"
+    assert len(out) > 0
+
+
+def test_generate_chunk_retries_a_runaway_before_splitting() -> None:
+    # first attempt hits the cap, second is fine -- the stochastic case
+    model = _FakeModel({4: [1.05, 0.5]})
+    synthesize.generate_chunk(model, None, "a b c d", sample_rate=100)
+    assert model.calls == ["a b c d", "a b c d"], "should retry the same text, not split yet"
+
+
+def test_generate_chunk_splits_when_retries_keep_hitting_the_cap() -> None:
+    # 4-word chunk always caps; the 2-word halves are healthy
+    model = _FakeModel({4: [1.05], 2: [0.5]})
+    synthesize.generate_chunk(model, None, "a b c d", sample_rate=100)
+    assert model.calls[:2] == ["a b c d", "a b c d"], "retries come first"
+    assert "a b" in model.calls and "c d" in model.calls, "then it splits at the midpoint"
+
+
+def test_generate_chunk_gives_up_rather_than_recursing_forever() -> None:
+    # everything caps at every depth; must terminate and still return audio
+    model = _FakeModel({4: [1.05], 2: [1.05], 1: [1.05]})
+    out = synthesize.generate_chunk(model, None, "a b c d", sample_rate=100)
+    assert len(out) > 0, "must still return the least-bad attempt"
+    assert len(model.calls) < 40, "recursion must be bounded by MAX_SPLIT_DEPTH"
+
+
+def test_generate_chunk_does_not_split_text_too_short_to_halve() -> None:
+    model = _FakeModel({3: [1.05]})
+    synthesize.generate_chunk(model, None, "a b c", sample_rate=100)
+    assert all(c == "a b c" for c in model.calls), "a 3-word chunk has no useful split"

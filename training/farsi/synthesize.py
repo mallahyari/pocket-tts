@@ -20,14 +20,20 @@ consistent, and the pieces are joined with a short pause.
 """
 
 import logging
+import math
 import re
 import tempfile
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import sphn
 import typer
 from typing_extensions import Annotated
+
+if TYPE_CHECKING:  # imported lazily at runtime; only needed for annotations here
+    from pocket_tts import TTSModel
+    from pocket_tts.models.tts_model import ModelState
 
 logger = logging.getLogger("synthesize")
 app = typer.Typer(pretty_exceptions_show_locals=False)
@@ -37,6 +43,99 @@ app = typer.Typer(pretty_exceptions_show_locals=False)
 HARD_BREAK = re.compile(r"(?<=[.!؟])\s+")
 SOFT_BREAK = re.compile(r"(?<=[،؛:])\s+")
 BREAK_CHARS = (".", "!", "؟", "،", "؛", ":")
+
+# A generation that never emits EOS runs to pocket-tts's internal length cap, so
+# its duration lands exactly at that cap. Measured on 25 held-out utterances:
+# healthy generations came out at <=0.92 of the cap, runaways at >=1.03. Anything
+# in 0.95-1.00 separates them; 0.97 is the midpoint of the observed gap.
+CAP_RATIO = 0.97
+# Two levels halves a chunk and halves it again -- enough to rescue a 30-token
+# chunk, while bounding worst-case work at 4 extra generations.
+MAX_SPLIT_DEPTH = 2
+
+
+def _cap_seconds(model: "TTSModel", text: str) -> float:
+    """The length cap pocket-tts will apply to this text, in seconds.
+
+    Mirrors TTSModel._estimate_max_gen_len. Read from the model where possible so
+    this tracks upstream; the fallbacks are the values as of pocket-tts 3.0.
+    """
+    tokens = model.flow_lm.conditioner.prepare(text).shape[1]
+    tps = getattr(model, "_TOKENS_PER_SECOND_ESTIMATE", 3.0)
+    pad = getattr(model, "_GEN_SECONDS_PADDING", 2.0)
+    frame_rate = model.config.mimi.frame_rate
+    return math.ceil((tokens / tps + pad) * frame_rate) / frame_rate
+
+
+def generate_chunk(
+    model: "TTSModel",
+    state: "ModelState",
+    text: str,
+    *,
+    frames_after_eos: int | None = None,
+    sample_rate: int | None = None,
+    retries: int = 1,
+    seam_sec: float = 0.05,
+    _depth: int = 0,
+) -> np.ndarray:
+    """Generate one chunk, recovering from runaway (no-EOS) generations.
+
+    The model was trained on ~3.8 s utterances (~11 tokens). Ask it for much more
+    and it may never learn to stop, running to the cap and emitting repetition --
+    9% of held-out items in the v2 baseline. Two mitigations, in order of cost:
+
+    1. **Retry.** Sampling is stochastic, so a marginal chunk often terminates on
+       a second attempt. Measured 2 of 5 runaways recovered this way.
+    2. **Split and recurse.** The other 3 were stuck deterministically -- every
+       seed ran to the cap, because a generation that never emits EOS always
+       produces exactly cap-length audio. Halving the text fixed all 3, since
+       both halves land back inside the trained distribution.
+
+    Lowering `eos_threshold` was also tried and is *not* a fix: stuck chunks
+    ignored it down to -6.0, and where it did fire it truncated to a third of the
+    expected length, trading a loop for a cut-off word.
+    """
+    sample_rate = sample_rate or int(model.mimi.sample_rate)
+    cap = _cap_seconds(model, text)
+
+    shortest: np.ndarray | None = None
+    for _ in range(retries + 1):
+        audio = np.asarray(
+            model.generate_audio(state, text, frames_after_eos=frames_after_eos), dtype=np.float32
+        ).reshape(-1)
+        if len(audio) / sample_rate <= CAP_RATIO * cap:
+            return audio
+        if shortest is None or len(audio) < len(shortest):
+            shortest = audio
+
+    words = text.split()
+    if _depth >= MAX_SPLIT_DEPTH or len(words) < 4:
+        # Out of options: hand back the least-bad attempt rather than nothing.
+        logger.warning(f"chunk still hit the length cap after splitting: {text}")
+        return shortest if shortest is not None else np.zeros(1, dtype=np.float32)
+
+    half = len(words) // 2
+    logger.info(
+        f"chunk hit the length cap; splitting {len(words)} words -> {half}+{len(words) - half}"
+    )
+    seam = np.zeros(int(seam_sec * sample_rate), dtype=np.float32)
+    parts = []
+    for piece in (" ".join(words[:half]), " ".join(words[half:])):
+        if parts:
+            parts.append(seam)
+        parts.append(
+            generate_chunk(
+                model,
+                state,
+                piece,
+                frames_after_eos=frames_after_eos,
+                sample_rate=sample_rate,
+                retries=retries,
+                seam_sec=seam_sec,
+                _depth=_depth + 1,
+            )
+        )
+    return np.concatenate(parts)
 
 
 def split_text(
@@ -128,11 +227,13 @@ def main(
     max_tokens: Annotated[
         int,
         typer.Option(
-            help="token budget per chunk (pocket-tts's own limit is 50). Lower it for "
-            "voices the model has not seen: stability degrades with generation length, "
-            "and 40 can run past EOS on an unfamiliar speaker where 25 does not."
+            help="token budget per chunk (pocket-tts's own limit is 50). Stability "
+            "degrades with generation length: measured on held-out speakers, chunks of "
+            "21+ tokens ran past EOS deterministically while 9-16 token chunks were "
+            "clean. Training utterances averaged ~11 tokens, so 18 stays near that "
+            "distribution; generate_chunk() splits anything that still runs away."
         ),
-    ] = 25,
+    ] = 18,
     temperature: Annotated[float, typer.Option()] = 0.3,
     eos_threshold: Annotated[float, typer.Option()] = -2.0,
     frames_after_eos: Annotated[
@@ -218,8 +319,11 @@ def main(
         # words were being dropped from generation when they were only being
         # dropped from the printed preview.
         logger.info(f"[{i}/{len(chunks)}] {len(sp.encode(chunk))} tokens: {chunk}")
-        audio = model.generate_audio(state, chunk, frames_after_eos=frames_after_eos)
-        pieces.append(np.asarray(audio, dtype=np.float32).reshape(-1))
+        pieces.append(
+            generate_chunk(
+                model, state, chunk, frames_after_eos=frames_after_eos, sample_rate=sample_rate
+            )
+        )
         if i < len(chunks):
             # A chunk ending at punctuation gets a real pause; one split
             # mid-phrase to fit the token budget gets --join-sec instead.

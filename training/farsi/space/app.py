@@ -22,7 +22,7 @@ from pocket_tts.utils.utils import download_if_necessary
 # duplicating them a third time, so a fix in either only has to happen once.
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from training.farsi.normalize_fa import normalize  # noqa: E402
-from training.farsi.synthesize import split_text  # noqa: E402
+from training.farsi.synthesize import generate_chunk, split_text  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
 logger = logging.getLogger("app")
@@ -36,7 +36,10 @@ TEMPERATURE = 0.3
 EOS_THRESHOLD = -2.0
 FRAMES_AFTER_EOS = 0
 VOICE_PROMPT_MAX_SEC = 5.0
-MAX_TOKENS_PER_CHUNK = 25
+# 18, not 25: on held-out speakers chunks of 21+ tokens ran past EOS
+# deterministically, while 9-16 token chunks were clean. Training utterances
+# averaged ~11 tokens. generate_chunk() rescues anything that still runs away.
+MAX_TOKENS_PER_CHUNK = 18
 PAUSE_SEC = 0.15
 
 logger.info("loading model...")
@@ -73,8 +76,11 @@ def generate(text: str, voice_name: str) -> str:
     pieces = []
     for i, chunk in enumerate(chunks, 1):
         logger.info(f"[{i}/{len(chunks)}] {chunk}")
-        audio = MODEL.generate_audio(state, chunk, frames_after_eos=FRAMES_AFTER_EOS)
-        pieces.append(np.asarray(audio, dtype=np.float32).reshape(-1))
+        pieces.append(
+            generate_chunk(
+                MODEL, state, chunk, frames_after_eos=FRAMES_AFTER_EOS, sample_rate=SAMPLE_RATE
+            )
+        )
         if i < len(chunks):
             pieces.append(gap)
 
