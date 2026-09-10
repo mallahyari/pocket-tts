@@ -16,6 +16,7 @@ build on.
 | [`build_anneal_set.py`](build_anneal_set.py) | a clean-but-diverse training subset, from alignment stats alone |
 | [`phonemize_manifest.py`](phonemize_manifest.py) | rewrite a manifest's transcripts into phonemes |
 | [`ingest_farsi_asr_yt.py`](ingest_farsi_asr_yt.py) | long-form training data from full recordings + subtitles |
+| [`validate_ingest.py`](validate_ingest.py) | do a manifest's time windows really contain the speech they claim? |
 
 ---
 
@@ -192,3 +193,42 @@ Three things worth knowing:
 `speaker` is one label per video — a proxy, since interviews and podcasts have
 several. Good enough for a speaker-disjoint split and voice-prompt pairing, not a
 verified speaker label.
+
+## `validate_ingest.py` — are the time windows honest?
+
+`ingest_farsi_asr_yt.py` trusts subtitle timings to locate speech inside
+hour-long recordings. If those timings are wrong the failure is **silent** —
+training just learns from mismatched audio and text. Run this before spending
+GPU time aligning or training on freshly ingested data.
+
+```bash
+uv run validate_ingest.py --manifest /mnt/data/farsi_600h/farsi_asr_yt.jsonl \
+    --n 100 --offsets " -1,-0.5,0,0.5,1"
+```
+
+Reads each sampled window exactly as the dataloader will, transcribes it, and
+compares against the manifest transcript — both through `normalize_fa`, so the
+comparison is not measuring formatting.
+
+**The offset sweep is the point.** A single WER number cannot tell "the
+transcripts are noisy" apart from "every window is shifted half a second".
+Re-scoring the same clips at several shifts separates them: lowest at 0 means the
+timings are right and the rest is transcript noise; lowest elsewhere means a
+systematic offset, which is *correctable* by adjusting `start` rather than a
+reason to discard the data.
+
+Expect ~25-35% WER at offset 0 for conversational Persian YouTube audio
+(`../RESULTS.md` records a 13.4% floor on *studio* audio), so read the shape of
+the curve, not the absolute number.
+
+Two things the verdict logic gets right, both learned by getting them wrong
+first — see `../../tests/test_farsi.py`:
+
+1. **A tie is not an offset.** A run where -1.0s and 0.0s both scored 23.8%
+   announced a "SYSTEMATIC OFFSET ... 0.0% better", because `min()` took
+   whichever came first. Ties now resolve toward 0.
+2. **Small gains are noise.** Anything under a 3% margin is reported as "treat
+   the timings as correct" rather than sending you off to shift a manifest.
+
+Note `--n` samples one window per recording first and only then takes seconds
+and thirds, so the sample spreads across the corpus instead of testing one file.

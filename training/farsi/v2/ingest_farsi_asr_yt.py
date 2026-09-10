@@ -123,9 +123,13 @@ def merge_cues(cues: list[Cue], min_sec: float, max_sec: float, max_gap: float) 
     return [c for c in out if min_sec <= (c.end - c.start) <= max_sec]
 
 
-def shard_names(limit: int | None) -> list[str]:
+def shard_names(limit: int | None, only: str | None = None) -> list[str]:
     files = HfApi().list_repo_files(REPO, repo_type="dataset")
     yt = sorted(f for f in files if f.startswith("youtube/") and f.endswith(".tar.gz"))
+    if only:
+        yt = [f for f in yt if only in f]
+        if not yt:
+            raise SystemExit(f"no shard matches {only!r}")
     return yt[:limit] if limit else yt
 
 
@@ -184,13 +188,19 @@ def main() -> None:
     ap.add_argument("--out-dir", type=Path, required=True, help="where transcoded FLAC goes")
     ap.add_argument("--manifest-out", type=Path, required=True)
     ap.add_argument("--shards", type=int, default=None, help="only the first N shards (smoke test)")
+    ap.add_argument(
+        "--only",
+        default=None,
+        help="substring-match a specific shard. Shards vary from 1.7 MB to 450 MB, and "
+        "--shards takes them in sorted order, so this is how you grab a small one to test with.",
+    )
     ap.add_argument("--min-sec", type=float, default=6.0, help="v1 averaged 3.8s; this is the point")
     ap.add_argument("--max-sec", type=float, default=20.0)
     ap.add_argument("--max-gap", type=float, default=1.5, help="never merge across a longer silence")
     ap.add_argument("--min-words", type=int, default=4)
     args = ap.parse_args()
 
-    shards = shard_names(args.shards)
+    shards = shard_names(args.shards, args.only)
     done_file = args.manifest_out.with_suffix(".done.txt")
     done = set(done_file.read_text().split()) if done_file.exists() else set()
     todo = [s for s in shards if s not in done]

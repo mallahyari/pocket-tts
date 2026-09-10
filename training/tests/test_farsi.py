@@ -517,3 +517,50 @@ def test_generate_chunk_does_not_split_text_too_short_to_halve() -> None:
     model = _FakeModel({3: [1.05]})
     synthesize.generate_chunk(model, None, "a b c", sample_rate=100)
     assert all(c == "a b c" for c in model.calls), "a 3-word chunk has no useful split"
+
+
+# --------------------------------------------------------------------------
+# validate_ingest.verdict: reading the offset sweep
+# --------------------------------------------------------------------------
+
+
+def _verdict(results: dict, offsets: list) -> str:
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / "farsi" / "v2" / "validate_ingest.py"
+    spec = importlib.util.spec_from_file_location("validate_ingest", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return " ".join(mod.verdict(results, offsets))
+
+
+OFFSETS = [-1.0, 0.0, 1.0]
+
+
+def test_a_tie_is_not_reported_as_an_offset() -> None:
+    # Regression: -1.0 and 0.0 both scored 23.8%, min() picked the first, and the
+    # run announced a "SYSTEMATIC OFFSET ... 0.0% better" -- chasing nothing.
+    out = _verdict({-1.0: (5, 21, 0), 0.0: (5, 21, 0), 1.0: (12, 21, 0)}, OFFSETS)
+    assert "SYSTEMATIC OFFSET" not in out
+    assert "no shift beats it" in out
+
+
+def test_a_real_offset_is_reported() -> None:
+    out = _verdict({-1.0: (2, 21, 0), 0.0: (9, 21, 0), 1.0: (12, 21, 0)}, OFFSETS)
+    assert "SYSTEMATIC OFFSET" in out and "-1.0s" in out
+
+
+def test_a_gain_under_the_noise_floor_is_not_an_offset() -> None:
+    out = _verdict({-1.0: (9, 100, 0), 0.0: (11, 100, 0), 1.0: (30, 100, 0)}, OFFSETS)
+    assert "SYSTEMATIC OFFSET" not in out
+    assert "noise" in out
+
+
+def test_high_wer_with_no_helpful_shift_blames_the_transcripts() -> None:
+    out = _verdict({-1.0: (19, 21, 0), 0.0: (18, 21, 0), 1.0: (20, 21, 0)}, OFFSETS)
+    assert "inspect the transcripts" in out
+
+
+def test_no_usable_windows_is_reported_rather_than_crashing() -> None:
+    assert "cannot judge" in _verdict({0.0: (0, 0, 5)}, [0.0])
