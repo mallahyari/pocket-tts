@@ -1,0 +1,68 @@
+# v2 teacher: 24 layers, trained from scratch on the phonemised 1,105 h corpus.
+#
+# Differences from lsd_scratch_fa.yaml are only the model config (phoneme
+# tokenizer), the data, and the run dir -- the recipe itself is unchanged, so
+# results stay comparable to v1.
+#
+# max_steps below is inherited from v1's 400k. ../RESULTS.md found v1's teacher
+# diverged from ~150k and concluded "~200k is right for a corpus this size -- the
+# reference 400k assumes 2,000+ h of clean audiobooks". At 1,105 h the honest
+# range is 250-400k: WATCH THE VALIDATION CURVE and stop where it bottoms rather
+# than trusting this number. num_ckpt_keep is high precisely so that is possible.
+# Farsi teacher: 24-layer LSD model trained from scratch on Persian speech.
+#
+# Mirrors training/configs/lsd_scratch.yaml -- the only changes are the model
+# config (Persian tokenizer), the manifests, the sample sentences, and a
+# per-GPU batch size sized for 8 x H100 (8 x 8 x 1 = effective batch 64).
+#
+# Acoustic quality only lifts off its plateau at 150-200k steps and
+# expressivity keeps improving to 400k; a shorter run ships a flat voice.
+# See training/README.md before trimming max_steps.
+model_config: training/farsi/configs/model_farsi_ph.yaml
+model_overrides:
+  flow_lm.transformer.num_layers: 24
+start_from_pretrained: false
+
+data:
+  train_jsonl: data/farsi_600h/v2_train_ph.jsonl
+  valid_jsonl: data/farsi_600h/v2_valid_ph.jsonl
+  max_duration_sec: 30.0
+  max_voice_prompt_sec: 5.0
+
+flow:
+  type: lsd
+  kwargs: {}
+
+flow_batch_multiplier: 4
+eos_loss_weight: 0.1
+text_dropout: 0.2
+voice_dropout: 0.2
+
+optim:
+  lr: 2e-4
+  schedule: cosine
+  warmup_steps: 1000
+
+run_dir: runs/lsd_scratch_v2
+# Effective batch (batch_size x GPUs x grad_accum_steps) must reach 64 rows;
+# below that the quality transition arrives late or not at all.
+#   8 x H100-80GB: batch_size 8,  grad_accum_steps 1  (~15 GiB/GPU, ~16h to 400k)
+#   1 x H100-80GB: batch_size 64, grad_accum_steps 1  (~56 GiB,     ~58h to 400k)
+#   1 x L4-23GB:   batch_size 16, grad_accum_steps 4  (~16 GiB,    ~315h to 400k)
+batch_size: 8
+grad_accum_steps: 1
+max_steps: 400000
+stats_ema_steps: 1000
+ema_decay: 0.999
+log_freq: 50
+valid_freq: 2500
+ckpt_freq: 2500
+num_ckpt_keep: 3
+sample_cfg_coef: 2.0  # teachers sample guided; the baked-in student default is 1.0
+# Rank 0 synthesizes these every sample_freq steps into run_dir/samples/, which
+# is how you judge a Farsi run by ear without waiting for an eval.
+sample_sentences:
+  - "سلام، حال شما چطور است؟"
+  - "این صدا هنوز در حال آموزش است و کیفیت آن بهتر خواهد شد."
+  - "امروز هوای تهران آفتابی است و دمای هوا به بیست و پنج درجه می‌رسد."
+sample_freq: 10000

@@ -17,6 +17,7 @@ build on.
 | [`phonemize_manifest.py`](phonemize_manifest.py) | rewrite a manifest's transcripts into phonemes |
 | [`ingest_farsi_asr_yt.py`](ingest_farsi_asr_yt.py) | long-form training data from full recordings + subtitles |
 | [`validate_ingest.py`](validate_ingest.py) | do a manifest's time windows really contain the speech they claim? |
+| [`prep_v2.py`](prep_v2.py) | **orchestrator** — the whole prep chain, with gates and resume |
 
 ---
 
@@ -232,3 +233,51 @@ first — see `../../tests/test_farsi.py`:
 
 Note `--n` samples one window per recording first and only then takes seconds
 and thirds, so the sample spreads across the corpus instead of testing one file.
+
+## `prep_v2.py` — the whole prep chain
+
+Turns the ingested corpus into something trainable: validated, aligned, merged,
+phonemised, tokenised, encoded to latents. ~5 h on 8xH100 Spot. Every step is
+resumable, so a preemption costs one step rather than the session.
+
+```bash
+uv run prep_v2.py --plan          # what would run, and what is already done
+uv run prep_v2.py                 # run it
+uv run prep_v2.py --from align    # resume at a named step
+```
+
+| step | does |
+|---|---|
+| preflight | mount, disk headroom, GPUs, ffmpeg, HF auth, inputs present |
+| validate | **gate** — `validate_ingest.py`, halts on a bad result |
+| align | word timings for the new rows, via the repo's own sharded `align()` |
+| merge | v1 + new into one manifest |
+| phonemize | transcripts *and* `words` into phonemes |
+| tokenizer | sentencepiece over the phoneme alphabet, vocab 4000 |
+| latents | precompute Mimi latents for the merged corpus |
+| snapshot | reminder, with the command |
+
+Design notes worth knowing if you modify it:
+
+* **The validation gate is real.** `validate_ingest.py` exits non-zero on a
+  systematic offset (2), bad transcripts (3), or no usable windows (4), and the
+  orchestrator stops rather than scraping stdout. Everything after that step is
+  expensive and mis-timed windows fail *silently*.
+* **Each step runs in the environment that owns it.** This file's own PEP 723
+  env carries only typer, so repo modules go through `uv run python -m ...` in
+  the repo, sibling scripts through `uv run <script>` (their own env), and the
+  GPU check uses `nvidia-smi` rather than importing torch. Using `sys.executable`
+  for any of them fails on the first import.
+* **`precompute_latents` takes a training config, not a manifest** — it reads
+  `data.train_jsonl` from it. The latents step therefore verifies the config
+  points at the phonemised manifest first, since otherwise it would quietly
+  encode the wrong corpus.
+* **Latents cannot be reused across a merge.** They are index-keyed to their
+  manifest (`latents/<tag>/<stem>_<idx>.safetensors`), so the merged corpus needs
+  a fresh pass — budget 1-2 h rather than expecting v1's to carry over.
+
+Companion configs: [`../configs/model_farsi_ph.yaml`](../configs/model_farsi_ph.yaml)
+(phoneme tokenizer, `n_bins` still 4000) and
+[`../configs/lsd_scratch_v2.yaml`](../configs/lsd_scratch_v2.yaml) (v2 teacher).
+Both differ from their v1 originals only in the tokenizer, data paths and run
+dir, so results stay comparable.

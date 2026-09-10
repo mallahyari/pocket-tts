@@ -93,8 +93,15 @@ MIN_GAIN = 0.03
 
 def verdict(results: dict[float, tuple[int, int, int]], offsets: list[float]) -> list[str]:
     """Read the offset sweep. Pure arithmetic, so it can be tested without an ASR."""
+    return _verdict(results, offsets)[0]
+
+
+def _verdict(
+    results: dict[float, tuple[int, int, int]], offsets: list[float]
+) -> tuple[list[str], int]:
+    """(report lines, exit code). 0 = usable, 2 = offset, 3 = bad transcripts, 4 = no data."""
     if 0.0 not in results or not results[0.0][1]:
-        return ["(no usable windows at offset 0 — cannot judge)"]
+        return ["(no usable windows at offset 0 — cannot judge)"], 4
     scored = {o: (e / n if n else 9e9) for o, (e, n, _) in results.items()}
     base = scored[0.0]
     # sorted by |offset| first so that ties resolve toward 0 rather than toward
@@ -107,22 +114,22 @@ def verdict(results: dict[float, tuple[int, int, int]], offsets: list[float]) ->
             f"⚠️  WER is lowest at {best:+.1f}s, not 0 — {gain:.1%} better than the manifest's own",
             "    timings. That is a SYSTEMATIC OFFSET. Correct `start` across the manifest",
             "    rather than discarding the data, then re-run this.",
-        ]
+        ], 2
     if len(offsets) > 1 and best != 0.0:
         return [
             f"ℹ️  {best:+.1f}s scores {gain:.1%} better than 0 — under the {MIN_GAIN:.0%} noise",
             "    floor, so treat the timings as correct rather than shifting them.",
             f"    WER at offset 0 is {base:.1%}.",
-        ]
+        ], 0
     if base <= 0.40:
         return [
             f"✅ WER {base:.1%} at offset 0, and no shift beats it — windows contain the right",
             "   speech. Remaining error is transcript noise, normal for this corpus.",
-        ]
+        ], 0
     return [
         f"⚠️  WER {base:.1%} at offset 0 is high and no shift improves it. Not a timing",
         "    problem — inspect the transcripts themselves before training on this.",
-    ]
+    ], 3
 
 
 def main() -> None:
@@ -206,8 +213,11 @@ def main() -> None:
         print(f"{off:>+7.1f}s  {e / n if n else float('nan'):>7.1%}  {n:>9,}  {sk:>11}")
     print("=" * 56)
 
-    for line in verdict(results, offsets):
+    lines, code = _verdict(results, offsets)
+    for line in lines:
         print(line)
+    # Non-zero so an orchestrator can gate on this rather than scraping stdout.
+    raise SystemExit(code)
 
 if __name__ == "__main__":
     main()
