@@ -15,6 +15,7 @@ build on.
 | [`build_eval_set.py`](build_eval_set.py) | a held-out eval set that is actually trustworthy |
 | [`build_anneal_set.py`](build_anneal_set.py) | a clean-but-diverse training subset, from alignment stats alone |
 | [`phonemize_manifest.py`](phonemize_manifest.py) | rewrite a manifest's transcripts into phonemes |
+| [`ingest_farsi_asr_yt.py`](ingest_farsi_asr_yt.py) | long-form training data from full recordings + subtitles |
 
 ---
 
@@ -142,3 +143,52 @@ sample, unlike silently mismatched words.
 Keep `--vocab-size 4000` when retraining the tokenizer afterwards: every tensor
 shape stays identical, so existing checkpoints still load and only the text
 embedding needs relearning. That turns a from-scratch retrain into a warm start.
+
+## `ingest_farsi_asr_yt.py` — long-form training data
+
+Every corpus behind v1 ships **pre-cut clips** — Filimo and YouTube-ASR extract
+at subtitle timings, Mana-TTS ships per-utterance FLAC — so training utterances
+average 3.8 s and long-form is permanently out of distribution. The source
+recordings were never distributed, so the existing manifests cannot be merged to
+fix it.
+
+[`farsi-asr/farsi-asr-dataset`](https://huggingface.co/datasets/farsi-asr/farsi-asr-dataset)'s
+`youtube/` half ships **full recordings** (48 kHz `.opus`) alongside the
+**complete subtitle file** (`.vtt`), so segmentation is yours to choose. MIT
+licensed.
+
+```bash
+uv run ingest_farsi_asr_yt.py --out-dir /mnt/data/farsi_asr_yt \
+    --manifest-out /mnt/data/farsi_600h/farsi_asr_yt.jsonl
+```
+
+Full run, 36 shards, 3h30m on an `n2-standard-16`:
+
+| | |
+|---|---|
+| videos | 1,814 |
+| subtitle cues | 744,436 → merged into 150,980 utterances |
+| kept | 144,571 (95.8%) |
+| **hours** | **608.2** |
+| **mean utterance** | **15.1 s** (against 3.8 s for the v1 corpus) |
+| FLAC on disk | ~128 GB |
+
+Resumable per shard. Merging respects two limits: never span a gap longer than
+`--max-gap` (that is music or silence, not continuous speech), and prefer to
+close a segment at sentence-ending punctuation.
+
+Three things worth knowing:
+
+1. **Check for cue overlap before trusting the hour count.** YouTube VTT often
+   uses rolling captions, which would make merged segments double-count audio.
+   Measured utterance-time / audio-time = 0.84x here — under 1.0, so the merge is
+   sound. Above 1.0 would mean the hours are fiction.
+2. **`sphn` cannot read opus** ("unsupported codec"), so audio is transcoded to
+   24 kHz mono FLAC — Mimi's own rate, lossless from the opus decode rather than
+   stacking a second lossy generation, ~534x realtime.
+3. **Rows carry `start`/`duration` windows** into the recordings rather than cut
+   files, so the segmentation can be revised later without re-ingesting anything.
+
+`speaker` is one label per video — a proxy, since interviews and podcasts have
+several. Good enough for a speaker-disjoint split and voice-prompt pairing, not a
+verified speaker label.
