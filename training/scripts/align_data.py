@@ -180,6 +180,31 @@ def _load_ctc_model(
     return model, vocab, blank, delim, fold, sr, use_bf16
 
 
+def read_utterance(entry: dict[str, Any], sr: int) -> npt.NDArray[np.float32]:
+    """Read exactly the utterance's own window from its file, mono, at `sr`.
+
+    A `start` of 0 is a real offset, not "unset". Long-form manifests point many
+    utterances at one hour-long recording and the first of them legitimately
+    starts at 0, so the window has to be bounded by `duration` rather than by
+    whether `start` happens to be non-zero. Bounding it on `start > 0` read the
+    entire recording for those rows -- an out-of-memory on any GPU, since the
+    alignment trellis is O(frames x tokens), and on any row small enough to
+    survive it, word timings measured against the wrong span.
+    """
+    start = float(entry.get("start", 0.0))
+    duration = float(entry.get("duration", 0.0) or 0.0)
+    wav, in_sr = sphn.read(
+        entry["path"],
+        start_sec=start if start > 0 else None,
+        duration_sec=duration if duration > 0 else None,
+    )
+    wav = wav.mean(axis=0)
+    if in_sr != sr:
+        resampled = convert_audio(torch.from_numpy(wav)[None], int(in_sr), int(sr), 1)
+        wav = resampled[0].numpy()
+    return wav
+
+
 def _entry_key(entry: ManifestKey) -> tuple[str, float]:
     return entry.path, entry.start
 
@@ -255,17 +280,7 @@ def main(
             if (entry["path"], float(entry.get("start", 0.0))) in done:
                 continue
             try:
-                start = float(entry.get("start", 0.0))
-                wav, in_sr = sphn.read(
-                    entry["path"],
-                    start_sec=start if start > 0 else None,
-                    duration_sec=entry["duration"] if start > 0 else None,
-                )
-                wav = wav.mean(axis=0)
-                if in_sr != sr:
-                    resampled = convert_audio(torch.from_numpy(wav)[None], int(in_sr), int(sr), 1)
-                    wav = resampled[0].numpy()
-                q.put((entry, wav))
+                q.put((entry, read_utterance(entry, sr)))
             except Exception as exc:  # noqa: BLE001
                 q.put((entry, exc))
         q.put(None)
