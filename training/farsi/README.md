@@ -23,6 +23,7 @@ lives next to it:
 | [`normalize_fa.py`](normalize_fa.py) | Persian text normalization: letter folding, diacritics, ZWNJ, digits → words |
 | [`prepare_data_fa.py`](prepare_data_fa.py) | download 4 public Persian corpora → filtered, aligned manifests + tokenizer |
 | [`DATASET_SURVEY.md`](DATASET_SURVEY.md) | four more public datasets evaluated as fine-tune candidates: license, format, and measured transcript accuracy for each |
+| [`v2/`](v2/) | tooling for improving the model: G2P benchmark, held-out eval set builder, manifest phonemizer |
 | [`eval_fa.py`](eval_fa.py) | Farsi WER / speaker similarity / UTMOS, plus the ASR's own error floor |
 | [`configs/`](configs/) | model configs and the three training recipes |
 | [`gcp/run_training.sh`](gcp/run_training.sh) | preemption-proof launcher for Spot VMs |

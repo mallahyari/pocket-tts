@@ -1,0 +1,91 @@
+# Final annealing stage: resume the finished 6-layer student and spend a few
+# thousand more steps on the cleanest slice of the corpus.
+#
+# Borrowed from LLM training: the model learns coverage from the big noisy
+# corpus, then finishes by learning what *good* sounds like. Cheap (~1 h on a
+# single GPU) and it changes nothing about the architecture, so it is the
+# lowest-risk experiment on the v2 list.
+#
+# The data is built by training/farsi/v2/build_anneal_set.py, which keeps every
+# Mana-TTS utterance plus the Filimo/YouTube utterances whose forced alignment
+# is as healthy as Mana-TTS's -- 162,726 utterances, 168 h, 1,100 speakers.
+#
+# Mana-TTS ALONE would be a mistake here: all 49,746 of its utterances are one
+# narrator, so annealing on it would specialise the model to that voice and put
+# the held-out speaker similarity (0.794 at baseline) at risk. The mixed set
+# keeps Mana-TTS at ~31%, clean but still diverse.
+#
+# HOW TO RUN -- this resumes, it does not start fresh. train.py picks up the
+# newest checkpoint in run_dir automatically, so seed the directory first:
+#
+#   mkdir -p runs/lsd_anneal_fa
+#   gcloud storage cp gs://.../lsd_distill_fa/checkpoint_00200000.pt runs/lsd_anneal_fa/
+#   uv run torchrun --nproc-per-node 8 training/train.py \
+#       training/farsi/configs/lsd_anneal_fa.yaml
+#
+# It will report "resuming at step 200000" and stop at max_steps below.
+
+model_config: training/farsi/configs/model_farsi.yaml   # 6-layer student
+start_from_pretrained: false
+
+# Distillation continues -- the objective must not change mid-run, or the
+# student is suddenly optimising something different from what produced it.
+distill_cfg_coef: 2.0
+distill_teacher_config: training/farsi/configs/model_farsi.yaml
+distill_teacher_overrides:
+  flow_lm.transformer.num_layers: 24
+# NOTE the `2`: the corrected teacher run. `lsd_scratch_fa` was the run poisoned
+# by the zeroed Mimi encoder (RESULTS.md); the usable teacher is in
+# gs://mehdi-pocket-tts-fa/lsd_scratch_fa2/.
+distill_teacher_weights: runs/lsd_scratch_fa2/checkpoint_00400000.pt
+
+data:
+  # Built by v2/build_anneal_set.py -- NOT the full train_aligned.jsonl.
+  #
+  # The `_latents` suffix matters: train.py reads precomputed Mimi latents when
+  # the manifest is named this way and a fresh sibling .meta.json exists. Each
+  # row references its own per-utterance .safetensors, so the filtered subset
+  # reuses the latents already on the disk instead of re-encoding 168 h.
+  train_jsonl: data/farsi_600h/anneal_train_latents.jsonl
+  # Unchanged on purpose: the anneal must be judged on the same held-out set as
+  # everything before it.
+  valid_jsonl: data/farsi_600h/valid_aligned.jsonl
+  max_duration_sec: 30.0
+  max_voice_prompt_sec: 5.0
+
+flow:
+  type: lsd
+  kwargs: {}
+
+flow_batch_multiplier: 4
+text_dropout: 0.0
+voice_dropout: 0.0
+
+optim:
+  # An order of magnitude below the 4e-4 of the main distillation run. The point
+  # is to polish a finished model, not to move it far: at 4e-4 five thousand
+  # steps on a 168 h subset would start overwriting what 200k steps on 497 h
+  # taught it.
+  lr: 5e-5
+  schedule: cosine
+  warmup_steps: 100     # brief, just to avoid a step-change in LR on resume
+  lr_min_ratio: 0.1
+
+run_dir: runs/lsd_anneal_fa
+batch_size: 16
+# 200000 (where the student finished) + 5000. max_steps is absolute, not a
+# delta, so this yields 5k annealing steps -- roughly half an epoch over the
+# 162,726-utterance subset at effective batch 64.
+max_steps: 205000
+ema_decay: 0.9999
+log_freq: 50
+valid_freq: 1000
+# Frequent, and keep everything: RESULTS.md lesson 1 was that num_ckpt_keep: 3
+# discarded the checkpoint that turned out to be best.
+ckpt_freq: 1000
+num_ckpt_keep: 999
+sample_sentences:
+  - "سلام، حال شما چطور است؟"
+  - "این صدا هنوز در حال آموزش است و کیفیت آن بهتر خواهد شد."
+  - "امروز هوای تهران آفتابی است و دمای هوا به بیست و پنج درجه می‌رسد."
+sample_freq: 2500
