@@ -111,6 +111,11 @@ def recut(prev: dict | None, row: dict, backup: float) -> bool:
 
     Returns False when the move would leave `prev` too short to keep, in which
     case nothing is changed.
+
+    Word timings move with the window. They are stored relative to `start`, so
+    a window that begins 0.5 s earlier puts every word 0.5 s later inside it --
+    leaving them alone silently shifts the cut the dataloader makes between
+    voice prompt and target.
     """
     start = float(row.get("start", 0.0))
     new_start = max(0.0, start - backup)
@@ -124,8 +129,19 @@ def recut(prev: dict | None, row: dict, backup: float) -> bool:
             if new_start - prev_start < MIN_DURATION_S:
                 return False
             prev["duration"] = round(new_start - prev_start, 3)
+            # Words the trim just cut off no longer have audio behind them.
+            if prev.get("words"):
+                prev["words"] = [
+                    w
+                    for w in prev["words"]
+                    if w.get("end") is None or float(w["end"]) <= prev["duration"]
+                ]
     row["start"] = round(new_start, 3)
     row["duration"] = round(float(row["duration"]) + moved, 3)
+    for word in row.get("words") or []:
+        for edge in ("start", "end"):
+            if word.get(edge) is not None:
+                word[edge] = round(float(word[edge]) + moved, 3)
     return True
 
 

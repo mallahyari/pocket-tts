@@ -130,3 +130,59 @@ def test_recut_leaves_a_distant_neighbour_alone() -> None:
     assert mod.recut(prev, row, 0.3)
     assert prev["duration"] == pytest.approx(2.0)
     assert row["start"] == pytest.approx(14.7)
+
+
+def test_word_timings_move_with_the_window() -> None:
+    """Word times are relative to `start`, so the window moving shifts them.
+
+    This shipped once: 44,787 repaired rows kept their original timings while
+    their windows moved up to 750 ms earlier. The dataloader cuts between voice
+    prompt and target on these, so every one of them would have cut in the
+    wrong place -- silently, with nothing downstream to notice.
+    """
+    mod = _mod()
+    row = {
+        "start": 162.213,
+        "duration": 8.0,
+        "words": [
+            {"word": "a", "start": 0.02, "end": 0.501},
+            {"word": "b", "start": 0.6, "end": 1.1},
+        ],
+    }
+    assert mod.recut(None, row, 0.49)
+    assert row["start"] == pytest.approx(161.723)
+    assert row["words"][0]["start"] == pytest.approx(0.51)
+    assert row["words"][0]["end"] == pytest.approx(0.991)
+    assert row["words"][1]["start"] == pytest.approx(1.09)
+
+
+def test_words_without_timings_are_left_alone() -> None:
+    """G2P drops alignment when it changes the word count; those rows carry None."""
+    mod = _mod()
+    row = {"start": 10.0, "duration": 6.0, "words": [{"word": "a", "start": None, "end": None}]}
+    assert mod.recut(None, row, 0.3)
+    assert row["words"][0]["start"] is None
+
+
+def test_trimming_a_neighbour_drops_words_it_no_longer_covers() -> None:
+    """prev loses its tail, so words past the new end have no audio behind them."""
+    mod = _mod()
+    prev = {
+        "start": 10.0,
+        "duration": 5.0,
+        "words": [
+            {"word": "keep", "start": 0.1, "end": 4.0},
+            {"word": "cut", "start": 4.6, "end": 4.95},
+        ],
+    }
+    row = {"start": 15.0, "duration": 8.0}
+    assert mod.recut(prev, row, 0.3)
+    assert prev["duration"] == pytest.approx(4.7)
+    assert [w["word"] for w in prev["words"]] == ["keep"]
+
+
+def test_a_row_without_words_still_repairs() -> None:
+    mod = _mod()
+    row = {"start": 20.0, "duration": 6.0}
+    assert mod.recut(None, row, 0.25)
+    assert row["start"] == pytest.approx(19.75)
