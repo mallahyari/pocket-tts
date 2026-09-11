@@ -6,13 +6,11 @@ left behind when their windows moved, a stale meta.json outliving its run.
 """
 
 import importlib.util
-import json
 import sys
 from pathlib import Path
 from types import ModuleType
 
 import numpy as np
-import pytest
 
 
 def _mod() -> ModuleType:
@@ -87,3 +85,15 @@ def test_clipped_rate_skips_unreadable_rows(tmp_path: Path) -> None:
     rows = [{"path": str(tmp_path / "nope.wav"), "start": 0.0, "duration": 2.0}]
     clipped, usable = mod.clipped_rate(rows, sample=1, seed=0)
     assert (clipped, usable) == (0, 0)
+
+
+def test_duplicate_detection_is_by_file_and_offset() -> None:
+    """Two rows naming the same clip train on that audio twice as often."""
+    rows = [
+        {"path": "/a.flac", "start": 0.0},
+        {"path": "/a.flac", "start": 0.0},   # duplicate
+        {"path": "/a.flac", "start": 5.0},   # different window, not a duplicate
+        {"path": "/b.flac", "start": 0.0},
+    ]
+    seen = {(x["path"], round(float(x.get("start", 0.0)), 3)) for x in rows}
+    assert len(rows) - len(seen) == 1

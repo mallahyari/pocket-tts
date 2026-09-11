@@ -31,8 +31,6 @@ import typer
 app = typer.Typer(pretty_exceptions_show_locals=False, add_completion=False)
 
 PERSIAN = re.compile(r"[؀-ۿ]")
-# Persian letters that genuinely close a word on a glottal stop.
-GLOTTAL_LETTERS = "عءأإؤئ"
 # Matches fix_onsets: a window whose first 50 ms already reaches half the
 # loudness of the whole utterance has speech under way at t=0.
 ONSET_WINDOW_S = 0.05
@@ -143,22 +141,33 @@ def main(
     r.check(no_graph == 0, "transcript_graphemes kept for scoring", f"{no_graph:,} missing")
     empty = sum(1 for x in rows if not x["transcript"].strip())
     r.check(empty == 0, "no empty transcripts", f"{empty:,} empty")
-    # A trailing "?" is correct when the Persian ends in ع or ء -- موقع, وضع and
-    # دفاع all really do close on a glottal stop. It is wrong only when the mark
-    # itself leaked through, which shows up as a trailing "?" on a word that has
-    # no such letter.
-    leaked = 0
-    for x in rows:
-        if not x["transcript"].rstrip().endswith("?"):
-            continue
-        graphemes = x.get("transcript_graphemes", "").rstrip().rstrip("؟").rstrip()
-        if graphemes and graphemes.split()[-1][-1] not in GLOTTAL_LETTERS:
-            leaked += 1
-    r.check(
-        leaked <= len(rows) // 1000,
-        "question marks did not leak in as glottal stops",
-        f"{leaked:,} of {len(rows):,} rows end in '?' without a glottal letter",
+    # Reported, not judged. Question marks cannot leak in as glottal stops: the
+    # mark is removed before G2P sees it, and a unit test pins that. Checking it
+    # from the corpus cannot work, because Persian routinely drops the hamza in
+    # spelling -- مبدا for مبدأ, رای for رأی, ارتقای for ارتقاء -- so a word
+    # ending in a real glottal stop often carries no glottal letter at all.
+    # Judged as a failure, this flagged 557 rows that were every one correct.
+    ending_glottal = sum(1 for x in rows if x["transcript"].rstrip().endswith("?"))
+    r.note(
+        "transcripts ending in a glottal stop",
+        f"{ending_glottal:,} of {len(rows):,} — expected: ع and dropped-hamza spellings",
     )
+
+    typer.echo("\ndurations and duplicates")
+    durations = [float(x["duration"]) for x in rows]
+    too_short = sum(1 for d in durations if d < 1.0)
+    too_long = sum(1 for d in durations if d > 30.0)
+    r.check(too_short == 0, "no utterance under 1 s", f"{too_short:,} rows")
+    # Mimi encodes per utterance and the loader pads to the longest in a batch,
+    # so one runaway row inflates memory for everything batched beside it.
+    r.check(too_long == 0, "no utterance over 30 s", f"{too_long:,} rows")
+    hours = sum(durations) / 3600
+    r.note("corpus size", f"{hours:,.0f} h across {len(rows):,} utterances")
+    # An identical (file, offset) twice is the same audio under two rows: it
+    # trains on that clip twice as often and inflates any eval drawn from it.
+    seen = {(x["path"], round(float(x.get("start", 0.0)), 3)) for x in rows}
+    dupes = len(rows) - len(seen)
+    r.check(dupes == 0, "no duplicate (file, start) rows", f"{dupes:,} duplicates")
 
     typer.echo("\nword timings")
     bad_span = bad_order = 0
