@@ -656,3 +656,55 @@ def test_fewer_rows_than_shards_still_round_trips(tmp_path: Path) -> None:
         part.write_text(chunk.read_text())
     prep.concat_parts(pairs, dst)
     assert dst.read_text() == "only\n"
+
+
+def test_localize_configs_repoints_manifests_at_the_data_disk(tmp_path: Path) -> None:
+    """Committed configs are repo-relative; on a GPU box the corpus is elsewhere.
+
+    Left unrewritten, precompute_latents opens 'data/farsi_600h/...', finds
+    nothing, and the step dies after every expensive step before it has run.
+    """
+    prep = _prep_v2()
+    data = tmp_path / "mnt" / "farsi_600h"
+    data.mkdir(parents=True)
+    (data / "v2_train_ph.jsonl").write_text("{}\n")
+
+    repo = tmp_path / "repo"
+    (repo / "training" / "farsi" / "configs").mkdir(parents=True)
+    model_rel = "training/farsi/configs/model_farsi_ph.yaml"
+    (repo / model_rel).write_text("tokenizer_path: data/farsi_600h/tokenizer_ph.model\n")
+    train_rel = "training/farsi/configs/lsd_scratch_v2.yaml"
+    (repo / train_rel).write_text(
+        f"model_config: {model_rel}\n"
+        "data:\n"
+        "  train_jsonl: data/farsi_600h/v2_train_ph.jsonl\n"
+        "  valid_jsonl: data/farsi_600h/v2_valid_ph.jsonl\n"
+    )
+
+    prep.REPO = repo
+    out = prep.localize_configs(prep.Paths(data=data), train_rel)
+
+    text = out.read_text()
+    assert f"train_jsonl: {data}/v2_train_ph.jsonl" in text
+    assert f"valid_jsonl: {data}/v2_valid_ph.jsonl" in text
+    assert "data/farsi_600h" not in text.replace(str(data), "")
+    # the model config is localized too, and pointed at
+    model_out = out.parent / "model_farsi_ph.yaml"
+    assert f"model_config: {model_out}" in text
+    assert f"tokenizer_path: {data}/tokenizer_ph.model" in model_out.read_text()
+    # the committed originals are untouched
+    assert "data/farsi_600h" in (repo / train_rel).read_text()
+
+
+def test_localize_configs_rejects_a_config_for_the_wrong_corpus(tmp_path: Path) -> None:
+    """precompute_latents takes no manifest argument, so a stale config
+    silently encodes the wrong corpus rather than failing."""
+    prep = _prep_v2()
+    data = tmp_path / "farsi_600h"
+    data.mkdir(parents=True)
+    repo = tmp_path / "repo"
+    (repo / "cfg").mkdir(parents=True)
+    (repo / "cfg" / "train.yaml").write_text("  train_jsonl: data/farsi_600h/old_corpus.jsonl\n")
+    prep.REPO = repo
+    with pytest.raises(prep.typer.Exit):
+        prep.localize_configs(prep.Paths(data=data), "cfg/train.yaml")

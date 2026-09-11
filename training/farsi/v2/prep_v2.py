@@ -364,6 +364,59 @@ def step_tokenizer(p: Paths) -> None:
     ])
 
 
+def localize_configs(p: Paths, train_config: str) -> Path:
+    """Write copies of the training and model configs that point at `p.data`.
+
+    The committed configs spell their manifests repo-relative (`data/farsi_600h/...`)
+    because that is where a laptop checkout keeps them. On a GPU box the corpus
+    lives on its own mounted disk, so those paths resolve to nothing and the run
+    dies on the first open. RUNBOOK.md handles this with a manual `sed -i`, which
+    is a step that has to be remembered at the one moment nobody is watching.
+
+    The copies live beside the corpus rather than replacing the originals, so
+    what is committed still matches what a reader sees.
+    """
+    src = REPO / train_config
+    if not src.exists():
+        typer.echo(f"    missing {train_config}")
+        raise typer.Exit(1)
+    text = src.read_text(encoding="utf-8")
+
+    want = p.merged_ph.name
+    if want not in text:
+        typer.echo(
+            f"    {train_config} does not reference {want}.\n"
+            "    precompute_latents reads the manifest from the config, so it would\n"
+            "    silently encode the wrong corpus. Fix data.train_jsonl first."
+        )
+        raise typer.Exit(1)
+
+    out_dir = p.data / "configs"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    relative = f"data/{p.data.name}"  # what the committed configs say
+
+    # The model config carries the tokenizer path and needs the same treatment,
+    # so localize it too and repoint the training config at the localized copy.
+    model_rel = next(
+        (line.split(":", 1)[1].strip() for line in text.splitlines()
+         if line.startswith("model_config:")),
+        None,
+    )
+    if model_rel:
+        model_src = REPO / model_rel
+        model_dst = out_dir / Path(model_rel).name
+        model_dst.write_text(
+            model_src.read_text(encoding="utf-8").replace(relative, str(p.data)),
+            encoding="utf-8",
+        )
+        text = text.replace(f"model_config: {model_rel}", f"model_config: {model_dst}")
+
+    dst = out_dir / Path(train_config).name
+    dst.write_text(text.replace(relative, str(p.data)), encoding="utf-8")
+    typer.echo(f"    configs pointed at {p.data} -> {dst}")
+    return dst
+
+
 def step_latents(p: Paths, train_config: str) -> None:
     if p.latents.exists():
         typer.echo(f"    {p.latents.name} exists — skipping")
@@ -371,23 +424,12 @@ def step_latents(p: Paths, train_config: str) -> None:
     # precompute_latents takes a TRAINING config and reads data.train_jsonl from
     # it -- it has no manifest argument. So the config must already point at the
     # phonemised manifest, which is why configs are checked before this runs.
-    cfg = REPO / train_config
-    if not cfg.exists():
-        typer.echo(f"    missing {train_config}")
-        raise typer.Exit(1)
-    want = str(p.merged_ph.name)
-    if want not in cfg.read_text(encoding="utf-8"):
-        typer.echo(
-            f"    {train_config} does not reference {want}.\n"
-            "    precompute_latents reads the manifest from the config, so it would\n"
-            "    silently encode the wrong corpus. Fix data.train_jsonl first."
-        )
-        raise typer.Exit(1)
+    cfg = localize_configs(p, train_config)
     typer.echo(
         "    Mimi latents are index-keyed to their manifest, so the merged corpus\n"
         "    cannot reuse v1's — this encodes ~1,100 h fresh. Expect ~1-2 h."
     )
-    run_repo(["-m", "training.scripts.precompute_latents", train_config])
+    run_repo(["-m", "training.scripts.precompute_latents", str(cfg)])
 
 
 def step_snapshot(p: Paths) -> None:
