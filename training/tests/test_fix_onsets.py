@@ -87,3 +87,56 @@ def test_previous_end_bounds_the_backup() -> None:
 def test_rms_of_empty_is_zero() -> None:
     mod = _mod()
     assert mod.rms(np.zeros(0, dtype=np.float32)) == 0.0
+
+
+def test_recut_moves_the_shared_boundary_rather_than_overlapping() -> None:
+    """Consecutive subtitle windows are back-to-back.
+
+    The silence a clipped window backs into lies inside the previous window's
+    tail, and the word after it belongs to the later window. Moving the shared
+    boundary fixes both: one gains its onset, the other sheds a fragment its
+    transcript never claimed. Bounding the backup by the neighbour's end
+    instead left 92% of clipped rows unrepairable on real data.
+    """
+    mod = _mod()
+    prev = {"start": 10.0, "duration": 5.0}   # ends at 15.0
+    row = {"start": 15.0, "duration": 8.0}
+    assert mod.recut(prev, row, 0.3)
+    assert row["start"] == pytest.approx(14.7)
+    assert row["duration"] == pytest.approx(8.3)
+    assert prev["duration"] == pytest.approx(4.7)   # now ends at 14.7, no overlap
+    assert prev["start"] + prev["duration"] == pytest.approx(row["start"])
+
+
+def test_recut_refuses_to_shrink_a_neighbour_below_the_floor() -> None:
+    mod = _mod()
+    prev = {"start": 10.0, "duration": 2.1}   # ends at 12.1
+    row = {"start": 12.1, "duration": 8.0}
+    assert not mod.recut(prev, row, 0.5)      # would leave prev at 1.6 s
+    assert prev["duration"] == pytest.approx(2.1)   # untouched
+    assert row["start"] == pytest.approx(12.1)
+
+
+def test_recut_handles_the_first_window_of_a_recording() -> None:
+    mod = _mod()
+    row = {"start": 0.4, "duration": 6.0}
+    assert mod.recut(None, row, 0.75)
+    assert row["start"] == pytest.approx(0.0)       # clamped at the file start
+    assert row["duration"] == pytest.approx(6.4)    # grew by what it actually moved
+
+
+def test_recut_at_the_very_start_of_a_file_is_a_no_op() -> None:
+    mod = _mod()
+    row = {"start": 0.0, "duration": 6.0}
+    assert not mod.recut(None, row, 0.5)
+    assert row["duration"] == pytest.approx(6.0)
+
+
+def test_recut_leaves_a_distant_neighbour_alone() -> None:
+    """A gap already exists; only the clipped window moves."""
+    mod = _mod()
+    prev = {"start": 10.0, "duration": 2.0}   # ends at 12.0
+    row = {"start": 15.0, "duration": 6.0}
+    assert mod.recut(prev, row, 0.3)
+    assert prev["duration"] == pytest.approx(2.0)
+    assert row["start"] == pytest.approx(14.7)

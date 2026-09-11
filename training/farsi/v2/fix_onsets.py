@@ -89,16 +89,46 @@ def find_backup(lead: np.ndarray, sr: int, level: float) -> float | None:
     return None
 
 
-def previous_end(ordered: list[dict], pos: int) -> float:
-    """End time of the preceding window in the same recording, else 0.
+# Never shorten a neighbour below this; a 6 s window losing 750 ms is fine, a
+# 2 s one is not worth keeping.
+MIN_DURATION_S = 2.0
 
-    Backing up past it would duplicate audio another utterance already owns,
-    training the model on the same speech under two different transcripts.
-    """
+
+def previous_end(ordered: list[dict], pos: int) -> float:
+    """End time of the preceding window in the same recording, else 0."""
     if pos == 0:
         return 0.0
     prev = ordered[pos - 1]
     return float(prev.get("start", 0.0)) + float(prev.get("duration", 0.0))
+
+
+def recut(prev: dict | None, row: dict, backup: float) -> bool:
+    """Move `row` back by `backup` seconds, trimming `prev` to meet it.
+
+    Consecutive subtitle windows are back-to-back, so the silence this backs up
+    into lies inside the previous window's tail -- and the word it precedes
+    belongs to `row`, not to `prev`. Moving the boundary therefore fixes both
+    sides: `row` gains its missing onset and `prev` sheds a trailing fragment
+    its own transcript never claimed.
+
+    Returns False when the move would leave `prev` too short to keep, in which
+    case nothing is changed.
+    """
+    start = float(row.get("start", 0.0))
+    new_start = max(0.0, start - backup)
+    moved = start - new_start
+    if moved <= 0:
+        return False
+    if prev is not None:
+        prev_start = float(prev.get("start", 0.0))
+        prev_end = prev_start + float(prev["duration"])
+        if prev_end > new_start:
+            if new_start - prev_start < MIN_DURATION_S:
+                return False
+            prev["duration"] = round(new_start - prev_start, 3)
+    row["start"] = round(new_start, 3)
+    row["duration"] = round(float(row["duration"]) + moved, 3)
+    return True
 
 
 @app.command()
@@ -133,7 +163,10 @@ def main(
             row = rows[i]
             start = float(row.get("start", 0.0))
             duration = float(row["duration"])
-            room = min(MAX_BACKUP_S, max(0.0, start - previous_end(ordered, pos)))
+            # Read a full lead-in regardless of where the previous window ends:
+            # the silence we want is usually *inside* that window's tail, and
+            # recut() moves the shared boundary rather than overlapping it.
+            room = min(MAX_BACKUP_S, start)
             try:
                 wav, sr = sphn.read(
                     row["path"], start_sec=max(0.0, start - room), duration_sec=duration + room
@@ -154,14 +187,13 @@ def main(
                 continue
             clipped += 1
             backup = find_backup(wav[:pad], sr, rms(body))
-            if backup is None:
+            prev = rows[idxs[pos - 1]] if pos > 0 else None
+            if backup is None or not recut(prev, row, backup):
                 dropped += 1
                 keep[i] = False
                 continue
             repaired += 1
             backups.append(backup)
-            row["start"] = round(max(0.0, start - backup), 3)
-            row["duration"] = round(duration + min(backup, start), 3)
 
     kept = sum(keep)
     typer.echo(f"\n  clean onsets      {clean:>8,}")
