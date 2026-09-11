@@ -49,26 +49,26 @@ G2P_REPO = "mehdi-hf/Homo-GE2PE-Persian-HF"
 _TO_REF = str.maketrans({"/": "a", "a": "A", "@": "?", "$": "S", "c": "C"})
 
 
-# Persian sentence-final "؟" survives G2P as a literal "?", which collides with
-# "?" the glottal stop. Measured on the corpus: of 6,944 phoneme transcripts
-# ending in "?", 6,653 came from a question mark and only 291 were a real
-# syllable-final glottal stop (جمع -> jam?). Left in, 6.6% of utterances teach
-# the model to close a question with a glottal stop it never hears.
+# GE2PE renders "؟" as "@", the same symbol it uses for the glottal stop, so a
+# question mark arrives as a glottal stop the speaker never utters -- 6.6% of
+# utterances, measured on the corpus.
+#
+# It cannot be undone afterwards. The number of "@" a question mark adds is not
+# fixed: "زده؟" gains two, while "موقع؟" and "جمع؟" gain one because their ع
+# already contributes its own. Counting trailing symbols therefore cannot tell
+# a question mark from a real glottal stop, and guessing wrong corrupts the
+# word. Removing the mark before G2P sees it leaves only genuine glottal stops.
 _QUESTION_MARKS = "؟?"
 
 
-def to_phonemes(text: str, source: str = "") -> str:
-    """Romanise G2P output; `source` is the Persian it came from, if known.
+def strip_question_marks(text: str) -> str:
+    """Drop "؟" before phonemisation. Every other punctuation mark is dropped by
+    G2P itself; this one is not, because it shares a symbol with a phoneme."""
+    return text.translate({ord(c): None for c in _QUESTION_MARKS})
 
-    The source text is what distinguishes a trailing question mark from a real
-    glottal stop, so pass it whenever it is available.
-    """
-    out = text.translate(_TO_REF).replace("1", "")
-    if source.rstrip().endswith(tuple(_QUESTION_MARKS)):
-        out = out.rstrip()
-        if out.endswith("?"):
-            out = out[:-1].rstrip()
-    return out
+
+def to_phonemes(text: str) -> str:
+    return text.translate(_TO_REF).replace("1", "")
 
 
 class G2P:
@@ -81,6 +81,7 @@ class G2P:
     def __call__(self, texts: list[str]) -> list[str]:
         # add_special_tokens=False and 5 beams match how the model was trained;
         # changing either measurably degrades it.
+        texts = [strip_question_marks(t) for t in texts]
         enc = self.tok(
             texts, padding=True, add_special_tokens=False, return_attention_mask=True, return_tensors="pt"
         ).to(self.device)
@@ -92,8 +93,7 @@ class G2P:
             max_length=512,
             early_stopping=True,
         )
-        decoded = self.tok.batch_decode(out, skip_special_tokens=True)
-        return [to_phonemes(d.strip(), src) for d, src in zip(decoded, texts)]
+        return [to_phonemes(d.strip()) for d in self.tok.batch_decode(out, skip_special_tokens=True)]
 
 
 def main() -> None:

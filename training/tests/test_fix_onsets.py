@@ -52,26 +52,32 @@ def test_silence_is_not_reported_as_clipped() -> None:
     assert not mod.onset_is_clipped(_silence(1.0), SR)
 
 
-def test_backup_finds_the_nearest_silence() -> None:
-    """Nearest, not furthest: backing up further drags in the previous word."""
+def test_backup_lands_on_a_window_that_is_actually_clean() -> None:
+    """The repair is judged by its result, not by finding any quiet moment.
+
+    Accepting the first quiet 30 ms left speech resuming inside the 50 ms the
+    onset test measures, so a third of "repaired" windows were still clipped.
+    """
     mod = _mod()
-    # [older speech][0.3 s gap][more speech] then the window begins
     lead = np.concatenate([_speech(0.2), _silence(0.3), _speech(0.1)])
-    backup = mod.find_backup(lead, SR, level=mod.rms(_speech(1.0)))
+    wav = np.concatenate([lead, _speech(2.0)])
+    backup = mod.choose_backup(wav, lead.size, SR)
     assert backup is not None
-    # the gap ends 0.1 s before the window, so we back up a little past that
-    assert 0.1 <= backup <= 0.45
+    moved = wav[lead.size - int(backup * SR) :]
+    assert not mod.onset_is_clipped(moved, SR)
 
 
 def test_no_backup_inside_continuous_speech() -> None:
-    """38% of clipped windows sit in continuous speech; those get dropped."""
+    """Those windows get dropped: nowhere to back up to."""
     mod = _mod()
-    assert mod.find_backup(_speech(0.75), SR, level=mod.rms(_speech(1.0))) is None
+    lead = _speech(0.75)
+    wav = np.concatenate([lead, _speech(2.0)])
+    assert mod.choose_backup(wav, lead.size, SR) is None
 
 
-def test_backup_is_none_for_an_empty_lead() -> None:
+def test_backup_is_none_without_a_lead_in() -> None:
     mod = _mod()
-    assert mod.find_backup(np.zeros(0, dtype=np.float32), SR, level=0.2) is None
+    assert mod.choose_backup(_speech(2.0), 0, SR) is None
 
 
 def test_rms_of_empty_is_zero() -> None:

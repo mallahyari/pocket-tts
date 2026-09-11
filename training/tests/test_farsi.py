@@ -792,32 +792,35 @@ def _phonemize_mod() -> ModuleType:
     return mod
 
 
-def test_trailing_question_mark_is_not_kept_as_a_glottal_stop() -> None:
-    """`؟` survives G2P as `?`, which is also the glottal stop symbol.
+def test_question_marks_are_removed_before_g2p_sees_them() -> None:
+    """GE2PE renders "؟" as "@", the symbol it also uses for the glottal stop.
 
-    Measured on the corpus: 6,653 of 6,944 transcripts ending in `?` came from
-    a question mark, teaching 6.6% of utterances a glottal stop that is not
-    spoken.
+    It cannot be undone afterwards: "زده؟" gains two "@" while "موقع؟" gains one,
+    because موقع's ع already contributes its own. Counting trailing symbols
+    cannot tell them apart, so the mark has to go in before phonemisation.
     """
     mod = _phonemize_mod()
-    # inputs are in GE2PE's own romanisation, which to_phonemes converts:
-    # "/" is short a, "a" is long aa, "@" is the glottal stop.
-    assert mod.to_phonemes("dAr/nd?", "آیا هنوز این مشکلات وجود دارند؟") == "dArand"
-    assert mod.to_phonemes("kist?", "کیست؟") == "kist"
+    assert mod.strip_question_marks("چقدر زده؟") == "چقدر زده"
+    assert mod.strip_question_marks("از اون موقع؟") == "از اون موقع"
+    assert mod.strip_question_marks("no marks here") == "no marks here"
+    # the ASCII form too, for manifests that were normalised differently
+    assert mod.strip_question_marks("what?") == "what"
 
 
-def test_a_real_syllable_final_glottal_stop_is_kept() -> None:
-    """جمع ends in ع, a genuine glottal stop, and must survive."""
+def test_real_glottal_stops_survive_phonemisation() -> None:
+    """جمع and موقع end in ع. Stripping their "@" would corrupt the word, which
+    is what a post-hoc rule on the source text did."""
     mod = _phonemize_mod()
-    assert mod.to_phonemes("jam@", "جمع") == "jAm?"
-    # no source given: nothing is stripped, since we cannot tell
-    assert mod.to_phonemes("jam@") == "jAm?"
+    # GE2PE notation: "@" glottal stop, "/" short a, "a" long aa
+    assert mod.to_phonemes("@in j/m@") == "?in jam?"
+    assert mod.to_phonemes("moqe@") == "moqe?"
 
 
-def test_question_mark_stripping_leaves_internal_glottal_stops(tmp_path: Path) -> None:
+def test_to_phonemes_maps_the_full_notation() -> None:
     mod = _phonemize_mod()
-    got = mod.to_phonemes("@ejtemA@i @/st?", "اجتماعی است؟")
-    assert got == "?ejtemA?i ?ast"
+    assert mod.to_phonemes("$om1a") == "SomA"      # $ -> S, the ezafe flag dropped
+    assert mod.to_phonemes("cera") == "CerA"       # c -> C, a -> A
+    assert mod.to_phonemes("@/st") == "?ast"       # @ -> ?, / -> a
 
 
 def test_eval_scores_against_graphemes_when_the_model_eats_phonemes(tmp_path: Path) -> None:

@@ -78,20 +78,31 @@ def onset_is_clipped(body: np.ndarray, sr: int) -> bool:
     return rms(head) / level > ONSET_RATIO
 
 
-def find_backup(lead: np.ndarray, sr: int, level: float) -> float | None:
-    """Seconds to extend backwards to reach quiet, or None if there is none.
+def choose_backup(wav: np.ndarray, pad: int, sr: int) -> float | None:
+    """Seconds to extend backwards so the window starts clean, or None.
 
-    `lead` is the audio immediately before the window, oldest sample first.
-    Searches from the window edge backwards so the result is the *nearest*
-    silence: backing up further than necessary drags in the previous word.
+    `wav` is the window with `pad` samples of lead-in in front of it. Candidate
+    silences are tried nearest-first, since backing up further than necessary
+    drags in the previous word -- but a candidate is only accepted if the
+    window it produces actually passes `onset_is_clipped`.
+
+    Testing the outcome rather than trusting the proxy is the point. Returning
+    the first quiet 30 ms window left speech resuming inside the 50 ms the
+    onset test measures, so a third of "repaired" windows were still clipped:
+    the corpus came out at 16% against the 7% of the studio recordings.
     """
-    if level <= 0 or lead.size == 0:
+    body = wav[pad:]
+    level = rms(body)
+    if level <= 0 or pad <= 0:
         return None
     win = max(1, int(QUIET_WINDOW_S * sr))
     hop = max(1, int(HOP_S * sr))
-    for end in range(lead.size, win - 1, -hop):
-        if rms(lead[end - win : end]) / level < QUIET_RATIO:
-            return (lead.size - end + win) / sr
+    for end in range(pad, win - 1, -hop):
+        if rms(wav[end - win : end]) / level >= QUIET_RATIO:
+            continue
+        candidate = end - win
+        if not onset_is_clipped(wav[candidate:], sr):
+            return (pad - candidate) / sr
     return None
 
 
@@ -200,7 +211,7 @@ def main(
                 clean += 1
                 continue
             clipped += 1
-            backup = find_backup(wav[:pad], sr, rms(body))
+            backup = choose_backup(wav, pad, sr)
             prev = rows[idxs[pos - 1]] if pos > 0 else None
             if backup is None or not recut(prev, row, backup):
                 dropped += 1
