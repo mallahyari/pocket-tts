@@ -281,3 +281,59 @@ Companion configs: [`../configs/model_farsi_ph.yaml`](../configs/model_farsi_ph.
 [`../configs/lsd_scratch_v2.yaml`](../configs/lsd_scratch_v2.yaml) (v2 teacher).
 Both differ from their v1 originals only in the tokenizer, data paths and run
 dir, so results stay comparable.
+
+## `fix_onsets.py` — windows that open mid-word
+
+Subtitle cues are timed to be readable, not to bound speech, so a window
+routinely opens partway through a word. Measured across the farsi-asr YouTube
+half, **30-46% of windows are already above half their own loudness in their
+first 50 ms** — speech underway at t=0. The v1 studio corpus scores 7% on the
+same test, so this arrived with the YouTube data.
+
+The model learns what it is shown. Trained on a corpus where nearly half the
+utterances begin mid-sound, it learns utterances can begin abruptly at full
+volume, and the casualty is every quiet onset. On the v2 teacher a native
+speaker heard it immediately: `man` (I) generated as `in` (this), `mAdar`
+(mother) as `Adar`, while the same words mid-sentence were clean and an initial
+`b` — a burst, not a murmur — was fine.
+
+```bash
+uv run fix_onsets.py --manifest .../farsi_asr_yt_aligned.jsonl --dry-run
+uv run fix_onsets.py --manifest .../farsi_asr_yt_aligned.jsonl --out .../onset.jsonl
+```
+
+The repair is to back the start up to the silence before the first word, not to
+trim: the audio is incomplete while the transcript still names the word in full.
+That silence normally sits inside the *previous* window's tail, holding a
+fragment that window's transcript never claimed either, so `recut` moves the
+shared boundary and both sides come out right. On 4,000 rows: 70% of clipped
+windows repaired, 30% dropped, 90.9% of rows kept.
+
+## Evaluating a phoneme model
+
+The v2 model is trained on phonemes, but WER is scored against an ASR that
+returns Persian script. Those must be different strings, so the eval manifest
+needs **both**: `phonemize_manifest.py` writes phonemes into `transcript` and
+keeps the original in `transcript_graphemes`, and `eval_fa.py` feeds the first
+to the model and scores against the second.
+
+```bash
+gsutil cp gs://mehdi-pocket-tts-fa/eval/cv_eval_v1.tar.gz . && tar xzf cv_eval_v1.tar.gz
+# the manifest ships absolute paths from wherever it was built -- repoint them
+python - <<'PY'
+import json, os
+p = "cv_eval/eval.jsonl"
+rows = [json.loads(l) for l in open(p) if l.strip()]
+for r in rows:
+    r["path"] = os.path.abspath("cv_eval/audio/" + os.path.basename(r["path"]))
+open(p, "w").writelines(json.dumps(r, ensure_ascii=False) + "\n" for r in rows)
+PY
+uv run phonemize_manifest.py --manifest cv_eval/eval.jsonl --out cv_eval/eval_ph.jsonl
+uv run python -m training.farsi.eval_fa <run_dir> --manifest cv_eval/eval_ph.jsonl \
+    --num-items 500 --eos-threshold -2
+```
+
+Skipping the phonemize step does not fail loudly: the Persian transcript
+tokenizes to all-unknown, the model is conditioned on nothing, and the score
+describes silence rather than the model. `normalize_for_model` now raises on
+text that normalisation empties, which catches the reverse mistake.
