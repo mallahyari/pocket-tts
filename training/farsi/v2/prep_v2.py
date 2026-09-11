@@ -422,19 +422,48 @@ def localize_configs(p: Paths, train_config: str) -> Path:
     return dst
 
 
+def write_training_config(p: Paths, localized: Path) -> Path:
+    """Emit the config to actually train with, once the latents exist.
+
+    These two steps want data.train_jsonl to say different things.
+    precompute_latents reads that key to learn which manifest to encode, so
+    during prep it has to name the plain one. The loader, though, only uses
+    precomputed latents when the manifest handed to it is the `_latents` one --
+    give it the plain manifest and it silently decodes audio every epoch,
+    wasting the entire encode pass with nothing in the logs to say so.
+
+    Leaving that swap to whoever launches training is exactly the kind of
+    remembered step this script exists to remove.
+    """
+    text = localized.read_text(encoding="utf-8")
+    text = text.replace(str(p.merged_ph), str(p.latents))
+    # Checkpoints belong on the data disk. run_dir is repo-relative, which puts
+    # a multi-day run's checkpoints on the boot disk, where they are both small
+    # and lost with the VM.
+    for line in text.splitlines():
+        if line.startswith("run_dir:"):
+            rel = line.split(":", 1)[1].strip()
+            text = text.replace(line, f"run_dir: {p.data.parent / rel}")
+            break
+    out = localized.with_name(localized.stem + "_train.yaml")
+    out.write_text(text, encoding="utf-8")
+    return out
+
+
 def step_latents(p: Paths, train_config: str) -> None:
-    if p.latents.exists():
-        typer.echo(f"    {p.latents.name} exists — skipping")
-        return
     # precompute_latents takes a TRAINING config and reads data.train_jsonl from
     # it -- it has no manifest argument. So the config must already point at the
     # phonemised manifest, which is why configs are checked before this runs.
     cfg = localize_configs(p, train_config)
-    typer.echo(
-        "    Mimi latents are index-keyed to their manifest, so the merged corpus\n"
-        "    cannot reuse v1's — this encodes ~1,100 h fresh. Expect ~1-2 h."
-    )
-    run_repo(["-m", "training.scripts.precompute_latents", str(cfg)])
+    if p.latents.exists():
+        typer.echo(f"    {p.latents.name} exists — skipping encode")
+    else:
+        typer.echo(
+            "    Mimi latents are index-keyed to their manifest, so the merged corpus\n"
+            "    cannot reuse v1's — this encodes ~1,100 h fresh. Expect ~1-2 h."
+        )
+        run_repo(["-m", "training.scripts.precompute_latents", str(cfg)])
+    typer.echo(f"    train with: {write_training_config(p, cfg)}")
 
 
 def step_snapshot(p: Paths) -> None:

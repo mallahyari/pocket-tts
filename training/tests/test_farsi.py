@@ -711,3 +711,30 @@ def test_localize_configs_rejects_a_config_for_the_wrong_corpus(tmp_path: Path) 
     prep.REPO = repo
     with pytest.raises(prep.typer.Exit):
         prep.localize_configs(prep.Paths(data=data), "cfg/train.yaml")
+
+
+def test_training_config_points_at_the_latents_manifest(tmp_path: Path) -> None:
+    """The loader uses precomputed latents only for a `_latents` manifest.
+
+    Handed the plain one it decodes audio every epoch instead, silently, with
+    nothing in the logs to say the encode pass was wasted.
+    """
+    prep = _prep_v2()
+    data = tmp_path / "mnt" / "data" / "farsi_600h"
+    data.mkdir(parents=True)
+    p = prep.Paths(data=data)
+    localized = data / "lsd_scratch_v2.yaml"
+    localized.write_text(
+        f"data:\n  train_jsonl: {p.merged_ph}\n  valid_jsonl: {p.valid_ph}\n"
+        "run_dir: runs/lsd_scratch_v2\n"
+    )
+
+    out = prep.write_training_config(p, localized)
+    text = out.read_text()
+    assert f"train_jsonl: {p.latents}" in text
+    # validation has no latents -- precompute_latents only encodes train_jsonl
+    assert f"valid_jsonl: {p.valid_ph}" in text
+    # checkpoints go to the data disk, not the boot disk the repo sits on
+    assert "run_dir: " + str(data.parent / "runs" / "lsd_scratch_v2") in text
+    # the prep-time config is left alone, so a rerun still encodes the right thing
+    assert f"train_jsonl: {p.merged_ph}\n" in localized.read_text()
