@@ -58,7 +58,10 @@ app = typer.Typer(pretty_exceptions_show_locals=False, add_completion=False)
 
 # Mimi encoding is per-utterance and index-keyed to the manifest, so a merged
 # manifest cannot reuse v1's latents -- budget a fresh pass over the whole corpus.
-STEPS = ["preflight", "validate", "align", "merge", "phonemize", "tokenizer", "latents", "snapshot"]
+STEPS = [
+    "preflight", "validate", "align", "onsets", "merge",
+    "phonemize", "tokenizer", "latents", "snapshot",
+]
 
 
 @dataclass
@@ -80,6 +83,11 @@ class Paths:
     @property
     def yt_aligned(self) -> Path:
         return self.data / "farsi_asr_yt_aligned.jsonl"
+
+    @property
+    def yt_onset(self) -> Path:
+        # Subtitle windows with their starts moved back to the preceding silence.
+        return self.data / "farsi_asr_yt_onset.jsonl"
 
     @property
     def merged(self) -> Path:
@@ -227,13 +235,39 @@ def step_align(p: Paths, gpus: int, model: str) -> None:
     ])
 
 
+def step_onsets(p: Paths) -> None:
+    """Move subtitle windows back to the silence before their first word.
+
+    Skipping this is what produced the audible defect in the first v2 teacher:
+    41% of the YouTube windows opened mid-sound, and the model learned to begin
+    utterances abruptly at full volume. A controlled test on that model had
+    every continuant-initial first word damaged -- `man` heard as `in`, `salAm`
+    as `shlaam` -- while the same words mid-sentence were clean.
+    """
+    if p.yt_onset.exists():
+        typer.echo(f"    {p.yt_onset.name} exists ({count_lines(p.yt_onset):,} rows) — skipping")
+        return
+    if run_script(
+        V2 / "fix_onsets.py",
+        ["--manifest", str(p.yt_aligned), "--out", str(p.yt_onset)],
+    ):
+        raise typer.Exit(1)
+
+
 def step_merge(p: Paths) -> None:
     if p.merged.exists():
         typer.echo(f"    {p.merged.name} exists ({count_lines(p.merged):,} rows) — skipping")
         return
+    if not p.yt_onset.exists():
+        typer.echo(
+            f"    {p.yt_onset.name} is missing — run the onsets step first.\n"
+            "    Merging the unrepaired manifest rebuilds the corpus whose\n"
+            "    mid-word starts taught the model to swallow quiet onsets."
+        )
+        raise typer.Exit(1)
     total = 0
     with open(p.merged, "w") as out:
-        for src in (p.v1_aligned, p.yt_aligned):
+        for src in (p.v1_aligned, p.yt_onset):
             n = 0
             with open(src) as f:
                 for line in f:
@@ -502,7 +536,8 @@ def main(
     if plan:
         typer.echo(f"data dir: {p.data}\n")
         outputs = {
-            "align": p.yt_aligned, "merge": p.merged, "phonemize": p.merged_ph,
+            "align": p.yt_aligned, "onsets": p.yt_onset, "merge": p.merged,
+            "phonemize": p.merged_ph,
             "tokenizer": p.tokenizer, "latents": p.latents,
         }
         for s in STEPS:
@@ -530,6 +565,8 @@ def main(
             step_validate(p, validate_n)
         elif name == "align":
             step_align(p, gpus, align_model)
+        elif name == "onsets":
+            step_onsets(p)
         elif name == "merge":
             step_merge(p)
         elif name == "phonemize":

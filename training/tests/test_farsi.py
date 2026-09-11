@@ -853,3 +853,47 @@ def test_eval_falls_back_to_the_transcript_for_grapheme_manifests(tmp_path: Path
 
     item = eval_fa.build_items(manifest, None, seed=0)[0]
     assert item["ref_text"] == item["text"]
+
+
+def test_merge_refuses_the_unrepaired_youtube_manifest(tmp_path: Path) -> None:
+    """Merging farsi_asr_yt_aligned.jsonl rebuilds the defective corpus.
+
+    41% of those windows open mid-sound. The first v2 teacher trained on them
+    and learned to begin utterances abruptly at full volume: every
+    continuant-initial first word was damaged (`man` heard as `in`, `salAm` as
+    `shlaam`) while the same words mid-sentence were clean.
+    """
+    prep = _prep_v2()
+    data = tmp_path / "farsi_600h"
+    data.mkdir(parents=True)
+    p = prep.Paths(data=data)
+    p.v1_aligned.write_text('{"path": "/a.wav"}\n')
+    p.yt_aligned.write_text('{"path": "/b.wav"}\n')
+    # yt_onset deliberately absent
+    with pytest.raises(prep.typer.Exit):
+        prep.step_merge(p)
+    assert not p.merged.exists()
+
+
+def test_merge_uses_the_repaired_manifest(tmp_path: Path) -> None:
+    prep = _prep_v2()
+    data = tmp_path / "farsi_600h"
+    data.mkdir(parents=True)
+    p = prep.Paths(data=data)
+    p.v1_aligned.write_text('{"id": "v1"}\n')
+    p.yt_aligned.write_text('{"id": "unrepaired"}\n')
+    p.yt_onset.write_text('{"id": "repaired"}\n')
+
+    prep.step_merge(p)
+    merged = p.merged.read_text()
+    assert '"repaired"' in merged
+    assert '"unrepaired"' not in merged
+    assert '"v1"' in merged
+
+
+def test_onsets_comes_between_align_and_merge() -> None:
+    """Order matters: repairing after the merge would miss the v1 half's
+    neighbours and leave the merged corpus stale."""
+    prep = _prep_v2()
+    steps = prep.STEPS
+    assert steps.index("align") < steps.index("onsets") < steps.index("merge")
