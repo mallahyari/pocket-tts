@@ -395,6 +395,12 @@ def localize_configs(p: Paths, train_config: str) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     relative = f"data/{p.data.name}"  # what the committed configs say
 
+    # Rewrite the relative paths BEFORE substituting any absolute one. The data
+    # dir is itself typically /mnt/data/<name>, so an absolute path inserted
+    # first still contains "data/<name>" and the rewrite mangles it a second
+    # time into /mnt//mnt/data/<name>.
+    text = text.replace(relative, str(p.data))
+
     # The model config carries the tokenizer path and needs the same treatment,
     # so localize it too and repoint the training config at the localized copy.
     model_rel = next(
@@ -403,16 +409,15 @@ def localize_configs(p: Paths, train_config: str) -> Path:
         None,
     )
     if model_rel:
-        model_src = REPO / model_rel
         model_dst = out_dir / Path(model_rel).name
         model_dst.write_text(
-            model_src.read_text(encoding="utf-8").replace(relative, str(p.data)),
+            (REPO / model_rel).read_text(encoding="utf-8").replace(relative, str(p.data)),
             encoding="utf-8",
         )
         text = text.replace(f"model_config: {model_rel}", f"model_config: {model_dst}")
 
     dst = out_dir / Path(train_config).name
-    dst.write_text(text.replace(relative, str(p.data)), encoding="utf-8")
+    dst.write_text(text, encoding="utf-8")
     typer.echo(f"    configs pointed at {p.data} -> {dst}")
     return dst
 

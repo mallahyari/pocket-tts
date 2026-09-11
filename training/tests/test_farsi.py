@@ -665,7 +665,9 @@ def test_localize_configs_repoints_manifests_at_the_data_disk(tmp_path: Path) ->
     nothing, and the step dies after every expensive step before it has run.
     """
     prep = _prep_v2()
-    data = tmp_path / "mnt" / "farsi_600h"
+    # Mirrors the real /mnt/data/farsi_600h: the absolute path itself contains
+    # "data/farsi_600h", so a second rewrite pass would corrupt it.
+    data = tmp_path / "mnt" / "data" / "farsi_600h"
     data.mkdir(parents=True)
     (data / "v2_train_ph.jsonl").write_text("{}\n")
 
@@ -691,6 +693,7 @@ def test_localize_configs_repoints_manifests_at_the_data_disk(tmp_path: Path) ->
     # the model config is localized too, and pointed at
     model_out = out.parent / "model_farsi_ph.yaml"
     assert f"model_config: {model_out}" in text
+    assert "/mnt//mnt" not in text and str(data) + "/" + str(data).lstrip("/") not in text
     assert f"tokenizer_path: {data}/tokenizer_ph.model" in model_out.read_text()
     # the committed originals are untouched
     assert "data/farsi_600h" in (repo / train_rel).read_text()
