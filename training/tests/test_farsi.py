@@ -883,14 +883,15 @@ def test_merge_uses_the_repaired_manifest(tmp_path: Path) -> None:
     data = tmp_path / "farsi_600h"
     data.mkdir(parents=True)
     p = prep.Paths(data=data)
-    p.v1_aligned.write_text('{"id": "v1", "path": "/v1.flac", "start": 0.0}\n')
+    p.v1_aligned.write_text('{"id": "v1-unrepaired", "path": "/v1.flac", "start": 0.0}\n')
+    p.v1_onset.write_text('{"id": "v1", "path": "/v1.flac", "start": 0.0}\n')
     p.yt_aligned.write_text('{"id": "unrepaired", "path": "/y.flac", "start": 2.0}\n')
     p.yt_onset.write_text('{"id": "repaired", "path": "/y.flac", "start": 1.6}\n')
 
     prep.step_merge(p)
     merged = p.merged.read_text()
     assert '"repaired"' in merged
-    assert '"unrepaired"' not in merged
+    assert "unrepaired" not in merged   # neither half's pre-repair manifest
     assert '"v1"' in merged
 
 
@@ -912,7 +913,7 @@ def test_merge_drops_duplicate_windows(tmp_path: Path) -> None:
     data = tmp_path / "farsi_600h"
     data.mkdir(parents=True)
     p = prep.Paths(data=data)
-    p.v1_aligned.write_text('{"path": "/a.flac", "start": 0.0}\n')
+    p.v1_onset.write_text('{"path": "/a.flac", "start": 0.0}\n')
     p.yt_onset.write_text(
         '{"path": "/b.flac", "start": 1.5}\n'
         '{"path": "/b.flac", "start": 1.5}\n'   # exact duplicate
@@ -924,3 +925,37 @@ def test_merge_drops_duplicate_windows(tmp_path: Path) -> None:
     assert sorted((r["path"], r["start"]) for r in kept) == [
         ("/a.flac", 0.0), ("/b.flac", 1.5), ("/b.flac", 9.0)
     ]
+
+
+def test_onsets_repairs_both_halves_of_the_corpus(tmp_path: Path) -> None:
+    """v1 clips are clipped too, and at a higher rate than anyone assumed.
+
+    Measured per source: manatts 4%, filimo 17%, v1's own youtube subset 30%.
+    They start at 0 with no audio in front, so they cannot be backed up --
+    fix_onsets drops them instead, costing 109 h of 1,092.
+    """
+    prep = _prep_v2()
+    data = tmp_path / "farsi_600h"
+    data.mkdir(parents=True)
+    p = prep.Paths(data=data)
+    p.v1_aligned.write_text('{"path": "/a.flac", "start": 0.0, "duration": 3.0}\n')
+    p.yt_aligned.write_text('{"path": "/b.flac", "start": 9.0, "duration": 8.0}\n')
+
+    calls: list[list[str]] = []
+    prep.run_script = lambda script, args: (calls.append(args), Path(args[-1]).write_text("{}\n"), 0)[-1]
+    prep.step_onsets(p)
+
+    manifests = [args[1] for args in calls]
+    assert str(p.yt_aligned) in manifests
+    assert str(p.v1_aligned) in manifests, "the v1 half must be repaired too"
+
+
+def test_merge_refuses_when_either_half_is_unrepaired(tmp_path: Path) -> None:
+    prep = _prep_v2()
+    data = tmp_path / "farsi_600h"
+    data.mkdir(parents=True)
+    p = prep.Paths(data=data)
+    p.yt_onset.write_text('{"path": "/b.flac", "start": 1.0}\n')
+    # v1_onset absent
+    with pytest.raises(prep.typer.Exit):
+        prep.step_merge(p)

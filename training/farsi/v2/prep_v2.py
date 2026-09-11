@@ -86,6 +86,12 @@ class Paths:
         return self.data / "farsi_asr_yt_aligned.jsonl"
 
     @property
+    def v1_onset(self) -> Path:
+        # v1 clips start at 0 with no audio in front, so a clipped onset there
+        # cannot be repaired -- fix_onsets drops those rows and keeps the rest.
+        return self.data / "train_aligned_onset.jsonl"
+
+    @property
     def yt_onset(self) -> Path:
         # Subtitle windows with their starts moved back to the preceding silence.
         return self.data / "farsi_asr_yt_onset.jsonl"
@@ -245,23 +251,23 @@ def step_onsets(p: Paths) -> None:
     every continuant-initial first word damaged -- `man` heard as `in`, `salAm`
     as `shlaam` -- while the same words mid-sentence were clean.
     """
-    if p.yt_onset.exists():
-        typer.echo(f"    {p.yt_onset.name} exists ({count_lines(p.yt_onset):,} rows) — skipping")
-        return
-    if run_script(
-        V2 / "fix_onsets.py",
-        ["--manifest", str(p.yt_aligned), "--out", str(p.yt_onset)],
-    ):
-        raise typer.Exit(1)
+    for src, dst in ((p.yt_aligned, p.yt_onset), (p.v1_aligned, p.v1_onset)):
+        if dst.exists():
+            typer.echo(f"    {dst.name} exists ({count_lines(dst):,} rows) — skipping")
+            continue
+        typer.echo(f"    {src.name} -> {dst.name}")
+        if run_script(V2 / "fix_onsets.py", ["--manifest", str(src), "--out", str(dst)]):
+            raise typer.Exit(1)
 
 
 def step_merge(p: Paths) -> None:
     if p.merged.exists():
         typer.echo(f"    {p.merged.name} exists ({count_lines(p.merged):,} rows) — skipping")
         return
-    if not p.yt_onset.exists():
+    missing = [q.name for q in (p.v1_onset, p.yt_onset) if not q.exists()]
+    if missing:
         typer.echo(
-            f"    {p.yt_onset.name} is missing — run the onsets step first.\n"
+            f"    {', '.join(missing)} missing — run the onsets step first.\n"
             "    Merging the unrepaired manifest rebuilds the corpus whose\n"
             "    mid-word starts taught the model to swallow quiet onsets."
         )
@@ -273,7 +279,7 @@ def step_merge(p: Paths) -> None:
     total = dropped = 0
     seen: set[tuple[str, float]] = set()
     with open(p.merged, "w") as out:
-        for src in (p.v1_aligned, p.yt_onset):
+        for src in (p.v1_onset, p.yt_onset):
             n = 0
             with open(src) as f:
                 for line in f:
@@ -555,7 +561,7 @@ def main(
     if plan:
         typer.echo(f"data dir: {p.data}\n")
         outputs = {
-            "align": p.yt_aligned, "onsets": p.yt_onset, "merge": p.merged,
+            "align": p.yt_aligned, "onsets": p.v1_onset, "merge": p.merged,
             "phonemize": p.merged_ph,
             "tokenizer": p.tokenizer, "latents": p.latents,
         }
