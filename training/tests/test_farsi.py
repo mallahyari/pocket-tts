@@ -870,8 +870,8 @@ def test_merge_refuses_the_unrepaired_youtube_manifest(tmp_path: Path) -> None:
     data = tmp_path / "farsi_600h"
     data.mkdir(parents=True)
     p = prep.Paths(data=data)
-    p.v1_aligned.write_text('{"path": "/a.wav"}\n')
-    p.yt_aligned.write_text('{"path": "/b.wav"}\n')
+    p.v1_aligned.write_text('{"path": "/a.wav", "start": 0.0}\n')
+    p.yt_aligned.write_text('{"path": "/b.wav", "start": 0.0}\n')
     # yt_onset deliberately absent
     with pytest.raises(prep.typer.Exit):
         prep.step_merge(p)
@@ -883,9 +883,9 @@ def test_merge_uses_the_repaired_manifest(tmp_path: Path) -> None:
     data = tmp_path / "farsi_600h"
     data.mkdir(parents=True)
     p = prep.Paths(data=data)
-    p.v1_aligned.write_text('{"id": "v1"}\n')
-    p.yt_aligned.write_text('{"id": "unrepaired"}\n')
-    p.yt_onset.write_text('{"id": "repaired"}\n')
+    p.v1_aligned.write_text('{"id": "v1", "path": "/v1.flac", "start": 0.0}\n')
+    p.yt_aligned.write_text('{"id": "unrepaired", "path": "/y.flac", "start": 2.0}\n')
+    p.yt_onset.write_text('{"id": "repaired", "path": "/y.flac", "start": 1.6}\n')
 
     prep.step_merge(p)
     merged = p.merged.read_text()
@@ -900,3 +900,27 @@ def test_onsets_comes_between_align_and_merge() -> None:
     prep = _prep_v2()
     steps = prep.STEPS
     assert steps.index("align") < steps.index("onsets") < steps.index("merge")
+
+
+def test_merge_drops_duplicate_windows(tmp_path: Path) -> None:
+    """The youtube ingest emitted 710 (file, offset) pairs twice over.
+
+    Left in, that audio trains twice as often as its neighbours for no reason,
+    and any eval drawn from the corpus inherits the same skew.
+    """
+    prep = _prep_v2()
+    data = tmp_path / "farsi_600h"
+    data.mkdir(parents=True)
+    p = prep.Paths(data=data)
+    p.v1_aligned.write_text('{"path": "/a.flac", "start": 0.0}\n')
+    p.yt_onset.write_text(
+        '{"path": "/b.flac", "start": 1.5}\n'
+        '{"path": "/b.flac", "start": 1.5}\n'   # exact duplicate
+        '{"path": "/b.flac", "start": 9.0}\n'   # same file, different window: keep
+    )
+    prep.step_merge(p)
+    kept = [json.loads(x) for x in p.merged.read_text().splitlines() if x.strip()]
+    assert len(kept) == 3
+    assert sorted((r["path"], r["start"]) for r in kept) == [
+        ("/a.flac", 0.0), ("/b.flac", 1.5), ("/b.flac", 9.0)
+    ]

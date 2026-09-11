@@ -44,6 +44,7 @@ turning a from-scratch retrain into a warm start. See `configs/finetune_fa.yaml`
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 import time
@@ -265,17 +266,35 @@ def step_merge(p: Paths) -> None:
             "    mid-word starts taught the model to swallow quiet onsets."
         )
         raise typer.Exit(1)
-    total = 0
+    # Deduplicate on (file, offset). The youtube ingest emitted 710 such pairs
+    # -- the same window under two rows -- and they survive alignment untouched.
+    # Left in, that audio is trained on twice as often as its neighbours for no
+    # reason, and any eval drawn from the corpus inherits the same skew.
+    total = dropped = 0
+    seen: set[tuple[str, float]] = set()
     with open(p.merged, "w") as out:
         for src in (p.v1_aligned, p.yt_onset):
             n = 0
             with open(src) as f:
                 for line in f:
-                    if line.strip():
-                        out.write(line if line.endswith("\n") else line + "\n")
-                        n += 1
+                    if not line.strip():
+                        continue
+                    row = json.loads(line)
+                    path = row.get("path")
+                    # A row with no path cannot be compared; keep it and let the
+                    # corpus check report it rather than dying here on one line.
+                    if path is not None:
+                        key = (path, round(float(row.get("start", 0.0)), 3))
+                        if key in seen:
+                            dropped += 1
+                            continue
+                        seen.add(key)
+                    out.write(line if line.endswith("\n") else line + "\n")
+                    n += 1
             typer.echo(f"    + {n:,} rows from {src.name}")
             total += n
+    if dropped:
+        typer.echo(f"    - {dropped:,} duplicate (file, offset) rows")
     typer.echo(f"    wrote {p.merged.name}: {total:,} rows")
 
 
