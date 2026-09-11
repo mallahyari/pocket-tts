@@ -216,6 +216,36 @@ def numbers_to_words(text: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def is_phonemic(text: str) -> bool:
+    """True when `text` is already phonemes rather than Persian script.
+
+    The v2 model is trained on romanised phonemes, so the Persian-specific
+    normalisation below deletes every character of its input and returns "".
+    That failure is silent three steps downstream: empty text conditions the
+    model on nothing, the model emits EOS immediately, and what you see is a
+    model that appears to have forgotten how to speak. Checking the script is
+    cheap and turns the whole class of mistake into a decision.
+    """
+    return not any(c in PERSIAN_LETTERS for c in text) and any(c.isascii() and c.isalpha() for c in text)
+
+
+def normalize_for_model(text: str) -> str:
+    """Normalise Persian input, or pass phonemes through untouched.
+
+    Raises rather than returning "" -- silently generating from empty text is
+    how three separate bugs in this pipeline stayed hidden.
+    """
+    if is_phonemic(text):
+        return text
+    out = normalize(text)
+    if text.strip() and not out.strip():
+        raise ValueError(
+            f"normalisation emptied the text: {text[:60]!r}. If this is phoneme input, "
+            "it was not recognised as such; if it is Persian, it is outside the alphabet."
+        )
+    return out
+
+
 def normalize(text: str, *, spell_numbers: bool = True) -> str:
     """Fold `text` onto the canonical Persian spelling used for training.
 

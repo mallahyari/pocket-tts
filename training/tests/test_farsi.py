@@ -17,6 +17,7 @@ from training.farsi.normalize_fa import (
     ALIGNER_ALPHABET,
     ALLOWED,
     ZWNJ,
+    is_phonemic,
     normalize,
     number_to_words,
     reject_reason,
@@ -738,3 +739,117 @@ def test_training_config_points_at_the_latents_manifest(tmp_path: Path) -> None:
     assert "run_dir: " + str(data.parent / "runs" / "lsd_scratch_v2") in text
     # the prep-time config is left alone, so a rerun still encodes the right thing
     assert f"train_jsonl: {p.merged_ph}\n" in localized.read_text()
+
+
+# --------------------------------------------------------------------------
+# phoneme text must survive the Persian-only paths
+#
+# The v2 model is trained on romanised phonemes. Persian normalisation deletes
+# every character of those, and the damage only shows three steps later as a
+# model that generates silence -- which is how the same mistake reached the
+# sampler, the synthesiser and the evaluator before anyone noticed.
+# --------------------------------------------------------------------------
+
+
+def test_phoneme_text_is_recognised_and_left_alone() -> None:
+    from training.farsi.normalize_fa import is_phonemic, normalize_for_model
+
+    ph = "salAm hAle SomA Cetor ?ast"
+    assert is_phonemic(ph)
+    assert normalize_for_model(ph) == ph
+
+
+def test_persian_text_is_still_normalised() -> None:
+    from training.farsi.normalize_fa import is_phonemic, normalize_for_model
+
+    fa = "سلام حال شما چطور است"
+    assert not is_phonemic(fa)
+    assert normalize_for_model(fa) == normalize(fa)
+    # digits still spell out, i.e. we did not bypass normalisation wholesale
+    assert normalize_for_model("۱۲۳") == normalize("۱۲۳")
+
+
+def test_normalisation_that_empties_the_text_raises() -> None:
+    """The silent version of this produced a model that appeared to have
+    forgotten how to speak."""
+    from training.farsi.normalize_fa import normalize_for_model
+
+    # Not phonemic (no ascii letters) and not Persian: normalisation kills it.
+    with pytest.raises(ValueError, match="emptied the text"):
+        normalize_for_model("《》〈〉")
+
+
+def _phonemize_mod() -> ModuleType:
+    import importlib.util
+    import sys
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / "farsi" / "v2" / "phonemize_manifest.py"
+    spec = importlib.util.spec_from_file_location("phonemize_manifest", path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["phonemize_manifest"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_trailing_question_mark_is_not_kept_as_a_glottal_stop() -> None:
+    """`؟` survives G2P as `?`, which is also the glottal stop symbol.
+
+    Measured on the corpus: 6,653 of 6,944 transcripts ending in `?` came from
+    a question mark, teaching 6.6% of utterances a glottal stop that is not
+    spoken.
+    """
+    mod = _phonemize_mod()
+    # inputs are in GE2PE's own romanisation, which to_phonemes converts:
+    # "/" is short a, "a" is long aa, "@" is the glottal stop.
+    assert mod.to_phonemes("dAr/nd?", "آیا هنوز این مشکلات وجود دارند؟") == "dArand"
+    assert mod.to_phonemes("kist?", "کیست؟") == "kist"
+
+
+def test_a_real_syllable_final_glottal_stop_is_kept() -> None:
+    """جمع ends in ع, a genuine glottal stop, and must survive."""
+    mod = _phonemize_mod()
+    assert mod.to_phonemes("jam@", "جمع") == "jAm?"
+    # no source given: nothing is stripped, since we cannot tell
+    assert mod.to_phonemes("jam@") == "jAm?"
+
+
+def test_question_mark_stripping_leaves_internal_glottal_stops(tmp_path: Path) -> None:
+    mod = _phonemize_mod()
+    got = mod.to_phonemes("@ejtemA@i @/st?", "اجتماعی است؟")
+    assert got == "?ejtemA?i ?ast"
+
+
+def test_eval_scores_against_graphemes_when_the_model_eats_phonemes(tmp_path: Path) -> None:
+    """The model is fed phonemes; the ASR returns Persian, so WER needs graphemes.
+
+    Scoring the phoneme string against an ASR transcript compares two different
+    alphabets and reports near-100% error regardless of how good the audio is.
+    """
+    manifest = tmp_path / "eval.jsonl"
+    rows = [
+        {"path": "/a.wav", "speaker": "s1", "transcript": "salAm donyA",
+         "transcript_graphemes": "سلام دنیا"},
+        {"path": "/b.wav", "speaker": "s1", "transcript": "xub ?ast",
+         "transcript_graphemes": "خوب است"},
+    ]
+    manifest.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows))
+
+    items = eval_fa.build_items(manifest, None, seed=0)
+    assert len(items) == 1
+    item = items[0]
+    assert is_phonemic(item["text"])          # what the model is given
+    assert not is_phonemic(item["ref_text"])  # what WER is scored against
+
+
+def test_eval_falls_back_to_the_transcript_for_grapheme_manifests(tmp_path: Path) -> None:
+    """v1 manifests have no `transcript_graphemes`; behaviour must not change."""
+    manifest = tmp_path / "eval.jsonl"
+    rows = [
+        {"path": "/a.wav", "speaker": "s1", "transcript": "سلام دنیا"},
+        {"path": "/b.wav", "speaker": "s1", "transcript": "خوب است"},
+    ]
+    manifest.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows))
+
+    item = eval_fa.build_items(manifest, None, seed=0)[0]
+    assert item["ref_text"] == item["text"]

@@ -277,19 +277,22 @@ def main(
         ),
     ] = 8,
     normalize_text: Annotated[
-        bool, typer.Option(help="apply the training-time Persian normalization first")
+        bool, typer.Option(help="apply the training-time Persian normalization first; phoneme input is detected and passed through untouched")
     ] = True,
 ) -> None:
     logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
     from pocket_tts import TTSModel
 
-    from training.farsi.normalize_fa import normalize
+    from training.farsi.normalize_fa import normalize_for_model
 
     raw = Path(text_file).read_text(encoding="utf-8") if text_file else text
     if not raw or not raw.strip():
         raise typer.BadParameter("pass --text or --text-file")
     if normalize_text:
-        raw = normalize(raw)
+        # Phoneme input passes through: the Persian normaliser deletes every
+        # character of it, and the resulting silence looks like a broken model
+        # rather than a mangled argument.
+        raw = normalize_for_model(raw)
 
     # frames_after_eos is a generate_audio argument, not a load_model one.
     model = TTSModel.load_model(config=config, temp=temperature, eos_threshold=eos_threshold)

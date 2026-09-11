@@ -39,7 +39,7 @@ import sphn
 import torch
 
 from training.eval.librispeech import MIN_FRAMES, EvalResults, latents_to_wav, load_run
-from training.farsi.normalize_fa import KEPT_PUNCT, ZWNJ, normalize
+from training.farsi.normalize_fa import KEPT_PUNCT, ZWNJ, normalize, normalize_for_model
 
 logger = logging.getLogger("eval_fa")
 
@@ -92,7 +92,18 @@ def build_items(manifest: Path, num_items: int | None, seed: int) -> list[dict]:
         rng.shuffle(rows)
         for i in range(0, len(rows) - 1, 2):
             prompt, target = rows[i], rows[i + 1]
-            items.append({"prompt": prompt, "target": target, "text": target["transcript"]})
+            # `text` is what the model is given; `ref_text` is what WER scores
+            # against. For the phonemised v2 corpus these differ: the model
+            # takes phonemes, while the ASR returns Persian script, so scoring
+            # phonemes against it would measure nothing. phonemize_manifest.py
+            # keeps the original in `transcript_graphemes`; grapheme manifests
+            # have no such field and both stay the transcript, as before.
+            items.append({
+                "prompt": prompt,
+                "target": target,
+                "text": target["transcript"],
+                "ref_text": target.get("transcript_graphemes") or target["transcript"],
+            })
     rng.shuffle(items)
     if num_items:
         items = items[:num_items]
@@ -201,7 +212,9 @@ def score_items(items: list[dict], device, args) -> tuple[list[dict], int]:
     bs = max(1, args.batch_size)
     for start_i in range(0, len(items), bs):
         chunk = items[start_i : start_i + bs]
-        tokens = [torch.tensor(tokenize(normalize(c["text"])), dtype=torch.long) for c in chunk]
+        tokens = [
+            torch.tensor(tokenize(normalize_for_model(c["text"])), dtype=torch.long) for c in chunk
+        ]
         with torch.no_grad():
             voice_latents = []
             for c in chunk:
@@ -221,7 +234,7 @@ def score_items(items: list[dict], device, args) -> tuple[list[dict], int]:
         good, gens = [], []
         for item, latents in zip(chunk, outs):
             capped = int(latents.shape[0] >= max_frames)
-            ref_text = wer_text(item["text"])
+            ref_text = wer_text(item["ref_text"])
             if latents.shape[0] < MIN_FRAMES:
                 records.append({"ref": ref_text, "hyp": "", "silent": 1, "no_eos": capped})
                 continue
@@ -259,7 +272,7 @@ def score_items(items: list[dict], device, args) -> tuple[list[dict], int]:
         ref_hyps = transcribe(refs_audio) if args.reference_floor else None
         for i, ((item, capped), hyp) in enumerate(zip(good, hyps)):
             rec = {
-                "ref": wer_text(item["text"]),
+                "ref": wer_text(item["ref_text"]),
                 "hyp": wer_text(hyp),
                 "silent": 0,
                 "no_eos": capped,

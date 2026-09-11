@@ -1,0 +1,108 @@
+# Inference config for the v2 TEACHER (24 layers).
+#
+# model_farsi_ph.yaml describes the 6-layer student. The teacher is that same
+# architecture with `flow_lm.transformer.num_layers: 24`, applied at training
+# time through `model_overrides` in lsd_scratch_v2.yaml -- which means nothing
+# on the inference side knows about it, and loading the teacher's weights
+# against the student config fails on every attention tensor.
+#
+# Point `weights_path` at a run's exported model.safetensors to use it:
+#   weights_path: /mnt/data/runs/lsd_scratch_v2/model.safetensors
+#
+# Input must be PHONEMES; this tokenizer has no Persian in its vocabulary.
+# v2 model config: identical to model_farsi.yaml except the tokenizer, which is
+# trained over the PHONEME alphabet rather than Persian script.
+#
+# n_bins stays 4000 on purpose. Every tensor shape is then unchanged (the
+# embedding is n_bins + 1 = 4001 rows either way), so existing checkpoints still
+# load and only the text embedding has to be relearned -- a warm start rather
+# than a from-scratch retrain. See configs/finetune_fa.yaml for the same trick.
+#
+# Text reaching this model MUST be phonemised the same way the training data was
+# (v2/phonemize_manifest.py, via mehdi-hf/Homo-GE2PE-Persian-HF). Feeding it raw
+# Persian script produces garbage -- the tokenizer has never seen those bytes.
+# Pocket TTS model config for Farsi (Persian).
+#
+# Architecture and Mimi codec weights are the released English model's -- Mimi
+# is an audio codec and knows nothing about language, and `weights_path` is
+# what training/modules/builders.py loads it from. With
+# `start_from_pretrained: false` (the from-scratch recipe) the FlowLM weights
+# in that file are ignored and re-initialized; the only Farsi-specific parts
+# here are the tokenizer and its vocabulary size.
+#
+# weights_path MUST be the voice-cloning repo (kyutai/pocket-tts), which is
+# gated: accept the licence on the model page, then `hf auth login`.
+#
+# Do NOT substitute kyutai/pocket-tts-without-voice-cloning to avoid the gate.
+# That checkpoint has Mimi's *encoder* and *encoder_transformer* zeroed out --
+# that is how voice cloning was removed from it. load_state_dict(strict=True)
+# still succeeds, because the keys exist and are simply zeros, so nothing
+# fails: encode_to_latent() silently returns all-zero latents and training
+# optimizes against silence. Run training/farsi/preflight.py before every run.
+#
+# lookup_table.n_bins MUST equal the sentencepiece vocab size exactly
+# (pocket_tts/conditioners/text.py asserts it), and tokenizer_path must point
+# at the tokenizer trained by training/scripts/train_tokenizer.py on Persian
+# transcripts. Both are set below for the default --vocab-size 4000.
+
+weights_path: hf://kyutai/pocket-tts/languages/english/model.safetensors@39592ff23c9ef80098bb74895d104c26275fe2c9
+# Sampling temperature the CLI uses by default; re-tune it on your own
+# checkpoints (0.3 is the English model's, 0.7 the other languages').
+default_temperature: 0.3
+
+
+flow_lm:
+  insert_bos_before_voice: true
+  dtype: float32
+  flow:
+    depth: 6
+    dim: 512
+  transformer:
+    d_model: 1024
+    hidden_scale: 4
+    max_period: 10000
+    num_heads: 16
+    num_layers: 24
+  lookup_table:
+    dim: 1024
+    n_bins: 4000
+    tokenizer: sentencepiece
+    tokenizer_path: data/farsi_600h/tokenizer_ph.model
+  #weights_path: final.safetensors
+
+mimi:
+  dtype: float32
+  sample_rate: 24000
+  inner_dim: 32
+  outer_dim: 512
+  channels: 1
+  frame_rate: 12.5
+  seanet:
+    dimension: 512
+    channels: 1
+    n_filters: 64
+    n_residual_layers: 1
+    ratios:
+    - 6
+    - 5
+    - 4
+    kernel_size: 7
+    residual_kernel_size: 3
+    last_kernel_size: 3
+    dilation_base: 2
+    pad_mode: constant
+    compress: 2
+  transformer:
+    d_model: 512
+    num_heads: 8
+    num_layers: 2
+    layer_scale: 0.01
+    context: 250
+    dim_feedforward: 2048
+    input_dimension: 512
+    output_dimensions:
+    - 512
+  quantizer:
+    dimension: 32
+    output_dimension: 512
+  #weights_path: codec.safetensors

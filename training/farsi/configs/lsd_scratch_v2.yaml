@@ -61,8 +61,16 @@ num_ckpt_keep: 3
 sample_cfg_coef: 2.0  # teachers sample guided; the baked-in student default is 1.0
 # Rank 0 synthesizes these every sample_freq steps into run_dir/samples/, which
 # is how you judge a Farsi run by ear without waiting for an eval.
+# PHONEMES, not Persian script. The v2 tokenizer has no Persian in its
+# vocabulary, so Persian sentences here tokenize to all-unknown, the model is
+# conditioned on nothing, and every sample comes out empty -- which reads in
+# the log as a model that has forgotten how to speak. The Persian each line
+# came from is in the comment beside it.
 sample_sentences:
-  - "سلام، حال شما چطور است؟"
-  - "این صدا هنوز در حال آموزش است و کیفیت آن بهتر خواهد شد."
-  - "امروز هوای تهران آفتابی است و دمای هوا به بیست و پنج درجه می‌رسد."
+  # سلام، حال شما چطور است؟
+  - "salAm hAle SomA Cetor ?ast"
+  # این صدا هنوز در حال آموزش است و کیفیت آن بهتر خواهد شد.
+  - "?in sedA hanuz dar hAle ?AmuzeS ?ast va keyfiate ?An behtar xAhad Sod"
+  # امروز هوای تهران آفتابی است و دمای هوا به بیست و پنج درجه می‌رسد.
+  - "?emruz havAye tehrAn ?AftAbi ?ast va damAye havA be bist ?o panj daraje mirasad"
 sample_freq: 10000

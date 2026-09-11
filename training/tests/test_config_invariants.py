@@ -89,3 +89,51 @@ class TestArgValidation:
         """A key the parser doesn't recognize is a setting the user thinks is applied."""
         with pytest.raises(ValueError, match="distill_seed_layers"):
             _from_dict(TrainArgs, {"distill_seed_layers": "first"})
+
+
+def test_phoneme_configs_have_phoneme_sample_sentences():
+    """A phoneme model's sample sentences must not be Persian script.
+
+    This shipped: lsd_scratch_v2.yaml kept v1's Persian sentences while its
+    tokenizer moved to phonemes, so every word tokenized to <unk>, the model
+    was conditioned on nothing, and every sample from step 110k on came out
+    empty. The log still said "wrote 3 samples", so nothing looked wrong.
+    """
+    import yaml
+
+    from training.farsi.normalize_fa import is_phonemic
+
+    root = Path(__file__).resolve().parents[1] / "farsi" / "configs"
+    for path in sorted(root.glob("*.yaml")):
+        raw = yaml.safe_load(path.read_text()) or {}
+        if "model_config" not in raw:  # a model config, not a training one
+            continue
+        args = load_args(str(path))
+        model_cfg = load_model_config(args.model_config, args.model_overrides)
+        tokenizer = str(model_cfg.flow_lm.lookup_table.tokenizer_path)
+        if "_ph" not in tokenizer:  # grapheme run: Persian sentences are right
+            continue
+        for sentence in args.sample_sentences:
+            assert is_phonemic(sentence), (
+                f"{path.name}: sample sentence is not phonemes, so it will tokenize "
+                f"to <unk> and generate silence: {sentence!r}"
+            )
+
+
+def test_teacher_inference_config_matches_the_trained_depth():
+    """Loading the v2 teacher needs a config of the same depth it was trained at.
+
+    lsd_scratch_v2.yaml deepens the model through `model_overrides`, which only
+    exists on the training side. Inference reads a model config directly, so
+    without a matching one every attention tensor fails to load -- the error is
+    a wall of missing key names that does not mention depth at all.
+    """
+    root = Path(__file__).resolve().parents[1] / "farsi" / "configs"
+    train = load_args(str(root / "lsd_scratch_v2.yaml"))
+    trained_depth = train.model_overrides["flow_lm.transformer.num_layers"]
+
+    teacher = load_model_config(str(root / "model_farsi_ph_teacher.yaml"), {})
+    assert teacher.flow_lm.transformer.num_layers == trained_depth
+
+    # and it must still be the phoneme tokenizer, not v1's
+    assert "_ph" in str(teacher.flow_lm.lookup_table.tokenizer_path)

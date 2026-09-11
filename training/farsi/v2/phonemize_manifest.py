@@ -49,8 +49,26 @@ G2P_REPO = "mehdi-hf/Homo-GE2PE-Persian-HF"
 _TO_REF = str.maketrans({"/": "a", "a": "A", "@": "?", "$": "S", "c": "C"})
 
 
-def to_phonemes(text: str) -> str:
-    return text.translate(_TO_REF).replace("1", "")
+# Persian sentence-final "؟" survives G2P as a literal "?", which collides with
+# "?" the glottal stop. Measured on the corpus: of 6,944 phoneme transcripts
+# ending in "?", 6,653 came from a question mark and only 291 were a real
+# syllable-final glottal stop (جمع -> jam?). Left in, 6.6% of utterances teach
+# the model to close a question with a glottal stop it never hears.
+_QUESTION_MARKS = "؟?"
+
+
+def to_phonemes(text: str, source: str = "") -> str:
+    """Romanise G2P output; `source` is the Persian it came from, if known.
+
+    The source text is what distinguishes a trailing question mark from a real
+    glottal stop, so pass it whenever it is available.
+    """
+    out = text.translate(_TO_REF).replace("1", "")
+    if source.rstrip().endswith(tuple(_QUESTION_MARKS)):
+        out = out.rstrip()
+        if out.endswith("?"):
+            out = out[:-1].rstrip()
+    return out
 
 
 class G2P:
@@ -74,7 +92,8 @@ class G2P:
             max_length=512,
             early_stopping=True,
         )
-        return [to_phonemes(s.strip()) for s in self.tok.batch_decode(out, skip_special_tokens=True)]
+        decoded = self.tok.batch_decode(out, skip_special_tokens=True)
+        return [to_phonemes(d.strip(), src) for d, src in zip(decoded, texts)]
 
 
 def main() -> None:

@@ -144,6 +144,7 @@ def write_samples(
             cfg_coef=args.sample_cfg_coef,
         )
         ratio = round(mimi.encoder_frame_rate / mimi.frame_rate)
+        written = 0
         for i, latents in enumerate(outs):
             if latents.shape[0] < 8:  # mimi decoder needs a few frames of context
                 logger.warning(f"sample {i} at step {step}: empty generation, skipped")
@@ -155,8 +156,19 @@ def write_samples(
                 audio.float().cpu().numpy(),
                 mimi.sample_rate,
             )
+            written += 1
     model.train()
-    logger.info(f"wrote {len(tokens)} samples at step {step}")
+    # Count files actually written, not sentences attempted: reporting the
+    # latter meant a run whose every sample came out empty still logged
+    # "wrote 3 samples", and nobody looked in the directory for 60k steps.
+    if written < len(tokens):
+        logger.warning(
+            f"wrote {written} of {len(tokens)} samples at step {step} — "
+            "empty generations usually mean the text did not tokenize "
+            "(phoneme model given Persian script, or vice versa)"
+        )
+    else:
+        logger.info(f"wrote {written} samples at step {step}")
 
 
 def ensure_train_latents(
