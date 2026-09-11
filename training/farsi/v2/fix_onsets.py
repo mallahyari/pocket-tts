@@ -24,11 +24,17 @@ the same words mid-sentence were clean and an initial /b/ was fine.
 
 **Backing up is the repair, not trimming.** When a window opens mid-word, the
 first word's audio is incomplete while the transcript still names it in full, so
-extending the start to the preceding silence makes audio and text agree. Of the
-clipped windows, 62% have a quiet gap within 750 ms (median 90 ms back, p90
-330 ms). The other 38% sit inside continuous speech with nowhere to back up to;
-those are dropped, because a window whose audio does not match its transcript
-is worse than no window at all.
+extending the start to the preceding silence makes audio and text agree. The
+silence to back into normally sits inside the *previous* window's tail, holding
+a fragment that window's own transcript never claimed either -- so `recut` moves
+the shared boundary and both sides come out right.
+
+Measured on 4,000 consecutive rows: 30% clipped, of which 70% were repaired
+(median 50 ms back, p90 380 ms) and 30% dropped, keeping 90.9% of rows overall.
+A random sample across the corpus puts the clipped rate nearer 46%, so the rate
+varies by source while the repair share holds. The dropped ones sit inside
+continuous speech with nowhere to back up to, and a window whose audio does not
+match its transcript is worse than no window at all.
 """
 
 from __future__ import annotations
