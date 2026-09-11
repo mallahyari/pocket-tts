@@ -252,35 +252,61 @@ SHARD_MIN_ROWS = 10_000
 def split_manifest(src: Path, dst: Path, shards: int) -> list[tuple[Path, Path]]:
     """Cut `src` into `shards` contiguous chunks, paired with their output paths.
 
-    Contiguous and in order, so concatenating the outputs in this same order
-    reproduces exactly what one pass over `src` would have written.
+    Round-robin, not contiguous blocks. Cost per row varies enormously -- G2P
+    is beam search over a byte-level T5, so a 400-character subtitle line costs
+    perhaps fifteen times a short studio utterance -- and the corpus is ordered,
+    with one source after another. Contiguous blocks therefore handed two
+    shards every expensive row: measured on the merged corpus, the fastest
+    shard finished in 24 minutes and the slowest wanted 6.5 hours, which is the
+    number that decides the step. Dealing rows out one at a time gives every
+    shard the same mixture.
     """
-    lines = src.open().readlines()
-    per = (len(lines) + shards - 1) // shards
     pairs = []
+    handles = []
     for i in range(shards):
         chunk = src.with_suffix(f".phchunk{i}")
-        chunk.write_text("".join(lines[i * per : (i + 1) * per]))
+        handles.append(chunk.open("w"))
         pairs.append((chunk, dst.with_suffix(f".phpart{i}")))
+    try:
+        with src.open() as f:
+            for i, line in enumerate(f):
+                handles[i % shards].write(line)
+    finally:
+        for h in handles:
+            h.close()
     return pairs
 
 
 def concat_parts(pairs: list[tuple[Path, Path]], dst: Path) -> None:
-    """Join the shard outputs back into `dst` and clean up the pieces."""
-    with dst.open("w") as f:
-        for chunk, part in pairs:
-            f.write(part.read_text())
-            chunk.unlink()
-            part.unlink()
+    """Undo the round-robin deal, restoring `src`'s own row order in `dst`.
+
+    Shard i holds original rows i, i+shards, i+2*shards..., so reading one line
+    from each part per round rebuilds the original sequence. Shard 0 is the
+    longest, so a part running out early is the expected tail, not a gap.
+    """
+    readers = [part.open() for _, part in pairs]
+    try:
+        with dst.open("w") as f:
+            while True:
+                lines = [r.readline() for r in readers]
+                if not any(lines):
+                    break
+                f.writelines(line for line in lines if line)
+    finally:
+        for r in readers:
+            r.close()
+    for chunk, part in pairs:
+        chunk.unlink()
+        part.unlink()
 
 
 def phonemize_sharded(src: Path, dst: Path, batch: int, shards: int) -> None:
-    """One G2P process per GPU over a contiguous slice of `src`.
+    """One G2P process per GPU over an interleaved share of `src`.
 
     G2P here is five-beam search over a byte-level T5. On a single card the
     merged corpus needs about seven hours while every other card sits idle,
     which is most of a prep session spent on the cheapest step in it. Each
-    slice resumes independently, since phonemize_manifest.py appends and skips
+    share resumes independently, since phonemize_manifest.py appends and skips
     whatever its own output already holds.
     """
     pairs = split_manifest(src, dst, shards)
@@ -298,7 +324,15 @@ def phonemize_sharded(src: Path, dst: Path, batch: int, shards: int) -> None:
     if [i for i, proc in enumerate(procs) if proc.wait() != 0]:
         typer.echo("    a phonemize shard failed — rerun to resume the rest")
         raise typer.Exit(1)
+    rows = count_lines(src)
     concat_parts(pairs, dst)
+    # Cheap, and the only thing standing between a mis-stitched corpus and a
+    # training run that quietly learns nothing: latents are index-keyed to this
+    # file, so a dropped row shifts every utterance after it onto wrong audio.
+    written = count_lines(dst)
+    if written != rows:
+        typer.echo(f"    {dst.name} has {written:,} rows, expected {rows:,} — refusing to continue")
+        raise typer.Exit(1)
 
 
 def step_phonemize(p: Paths, batch: int, gpus: int) -> None:

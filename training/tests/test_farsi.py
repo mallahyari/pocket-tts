@@ -614,7 +614,24 @@ def test_sharding_covers_every_row_exactly_once(tmp_path: Path) -> None:
     src.write_text("".join(f"row{i}\n" for i in range(1000)))
     pairs = prep.split_manifest(src, tmp_path / "out.jsonl", 7)
     seen = [line for chunk, _ in pairs for line in chunk.read_text().splitlines()]
-    assert seen == [f"row{i}" for i in range(1000)]
+    assert sorted(seen, key=lambda r: int(r[3:])) == [f"row{i}" for i in range(1000)]
+
+
+def test_shards_are_balanced_not_contiguous(tmp_path: Path) -> None:
+    """The corpus is ordered by source and cost per row follows it.
+
+    Contiguous blocks gave one shard every long subtitle line: 24 minutes on
+    the fastest, 6.5 hours on the slowest, and the slowest is what the step
+    costs. Dealing rows round-robin gives every shard the same mixture.
+    """
+    prep = _prep_v2()
+    src = tmp_path / "corpus.jsonl"
+    # First half cheap, second half expensive -- the real corpus's shape.
+    src.write_text("".join(f"{'cheap' if i < 500 else 'costly'}{i}\n" for i in range(1000)))
+    pairs = prep.split_manifest(src, tmp_path / "out.jsonl", 8)
+    per_shard = [chunk.read_text().count("costly") for chunk, _ in pairs]
+    assert max(per_shard) - min(per_shard) <= 1
+    assert sum(per_shard) == 500
 
 
 def test_shard_pieces_are_cleaned_up(tmp_path: Path) -> None:
