@@ -74,16 +74,6 @@ def test_backup_is_none_for_an_empty_lead() -> None:
     assert mod.find_backup(np.zeros(0, dtype=np.float32), SR, level=0.2) is None
 
 
-def test_previous_end_bounds_the_backup() -> None:
-    mod = _mod()
-    ordered = [
-        {"start": 10.0, "duration": 3.0},
-        {"start": 14.0, "duration": 2.0},
-    ]
-    assert mod.previous_end(ordered, 0) == 0.0
-    assert mod.previous_end(ordered, 1) == pytest.approx(13.0)
-
-
 def test_rms_of_empty_is_zero() -> None:
     mod = _mod()
     assert mod.rms(np.zeros(0, dtype=np.float32)) == 0.0

@@ -94,14 +94,6 @@ def find_backup(lead: np.ndarray, sr: int, level: float) -> float | None:
 MIN_DURATION_S = 2.0
 
 
-def previous_end(ordered: list[dict], pos: int) -> float:
-    """End time of the preceding window in the same recording, else 0."""
-    if pos == 0:
-        return 0.0
-    prev = ordered[pos - 1]
-    return float(prev.get("start", 0.0)) + float(prev.get("duration", 0.0))
-
-
 def recut(prev: dict | None, row: dict, backup: float) -> bool:
     """Move `row` back by `backup` seconds, trimming `prev` to meet it.
 
@@ -146,7 +138,8 @@ def main(
         rows = rows[:limit]
     typer.echo(f"{len(rows):,} rows from {manifest.name}")
 
-    # Group by recording so a window can be bounded by its predecessor.
+    # Group by recording, in time order, so recut() can reach the window whose
+    # tail holds the boundary it needs to move.
     by_path: dict[str, list[int]] = defaultdict(list)
     for i, row in enumerate(rows):
         by_path[row["path"]].append(i)
@@ -158,7 +151,6 @@ def main(
     keep = [True] * len(rows)
 
     for idxs in tqdm(list(by_path.values()), unit="recording"):
-        ordered = [rows[i] for i in idxs]
         for pos, i in enumerate(idxs):
             row = rows[i]
             start = float(row.get("start", 0.0))
