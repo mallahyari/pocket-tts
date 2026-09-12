@@ -38,6 +38,8 @@ Phonemise first with
 import torch
 from transformers import AutoTokenizer, T5ForConditionalGeneration
 
+from normalize_fa import normalize_for_model   # shipped in this repo
+
 G2P = "mehdi-hf/Homo-GE2PE-Persian-HF"
 tok = AutoTokenizer.from_pretrained(G2P)
 g2p = T5ForConditionalGeneration.from_pretrained(G2P).eval()
@@ -45,7 +47,13 @@ g2p = T5ForConditionalGeneration.from_pretrained(G2P).eval()
 TO_PHONEMES = str.maketrans({"/": "a", "a": "A", "@": "?", "$": "S", "c": "C"})
 
 def phonemise(text: str) -> str:
-    # "؟" shares a symbol with the glottal stop in this notation; drop it first
+    # Normalise FIRST. G2P has no reading for digits and drops them without a
+    # word: "تا سال ۲۰۳۰" comes back as "tA sAle  " with the year simply gone.
+    # normalize_fa.py (shipped in this repo) spells numbers out, unifies the
+    # Arabic/Persian letter variants and strips the characters the tokenizer
+    # has no entry for.
+    text = normalize_for_model(text)
+    # "؟" shares a symbol with the glottal stop in this notation; drop it next
     text = text.replace("؟", "").replace("?", "")
     enc = tok([text], add_special_tokens=False, return_tensors="pt")
     with torch.no_grad():
@@ -55,6 +63,8 @@ def phonemise(text: str) -> str:
 
 phonemise("سلام، حال شما چطور است؟")
 # 'salAm hAle SomA Cetor ?ast'
+phonemise("تا سال ۲۰۳۰ تغییر دهد.")
+# 'tA sAle do hezAr ?o si taqir dahad'
 ```
 
 ### The config must switch off the orthographic text frontend
