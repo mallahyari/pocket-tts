@@ -134,14 +134,38 @@ count.
 
 ## Samples
 
-`samples/` holds three clips, all cloned from one held-out Common Voice speaker
-the model never trained on:
+Every clip is cloned from a held-out Common Voice speaker the model never
+trained on. The prompt is five seconds; the generated speech follows.
 
-| file | text |
-|---|---|
-| `hello.wav` | سلام، حال شما چطور است؟ |
-| `short_sentence.wav` | مادر کتاب را روی میز اتاق گذاشت |
-| `news_paragraph.wav` | کریس رایت، وزیر انرژی آمریکا، گفت واشینگتن اقتصاد جمهوری اسلامی را تحت فشار قرار می‌دهد تا سیاست حکومت تغییر کند |
+### Greeting, female voice
+
+سلام، حال شما چطور است؟ امیدوارم روز خوبی داشته باشید.
+
+<table><tr>
+<td><b>voice prompt</b><br><audio controls preload="none" src="https://huggingface.co/mehdi-hf/pocket-tts-farsi-v2/resolve/main/samples/prompt_hello.wav"></audio></td>
+<td><b>generated</b><br><audio controls preload="none" src="https://huggingface.co/mehdi-hf/pocket-tts-farsi-v2/resolve/main/samples/hello.wav"></audio></td>
+</tr></table>
+
+### One sentence, female voice
+
+مادر کتاب را روی میز اتاق گذاشت و پنجره را باز کرد.
+
+<table><tr>
+<td><b>voice prompt</b><br><audio controls preload="none" src="https://huggingface.co/mehdi-hf/pocket-tts-farsi-v2/resolve/main/samples/prompt_short_sentence.wav"></audio></td>
+<td><b>generated</b><br><audio controls preload="none" src="https://huggingface.co/mehdi-hf/pocket-tts-farsi-v2/resolve/main/samples/short_sentence.wav"></audio></td>
+</tr></table>
+
+### News sentence, male voice
+
+شرکت آنتروپیک مدلی اقتصادی منتشر کرده که نشان می‌دهد هوش مصنوعی چگونه می‌تواند اقتصاد آمریکا را تا سال ۲۰۳۰ تغییر دهد.
+
+<table><tr>
+<td><b>voice prompt</b><br><audio controls preload="none" src="https://huggingface.co/mehdi-hf/pocket-tts-farsi-v2/resolve/main/samples/prompt_news_paragraph.wav"></audio></td>
+<td><b>generated</b><br><audio controls preload="none" src="https://huggingface.co/mehdi-hf/pocket-tts-farsi-v2/resolve/main/samples/news_paragraph.wav"></audio></td>
+</tr></table>
+
+If the players do not appear, the audio files are under
+[`samples/`](./tree/main/samples) and play in any browser.
 
 ---
 
