@@ -191,7 +191,100 @@ on that.*
 
 ---
 
-## Two wrong turns
+## The first word was being deleted before the model ever saw it
+
+Every generation lost or mangled its opening word. `man be bAzAr raftam` came
+back as *به بازار رفتم*, `salAm` as *شلام*, `keris` as *ریس*. The onset repair
+did not fix it, three corpus re-preps did not fix it, and a fine-tune did not
+fix it, because none of them were the cause.
+
+The cause is one line in the inference text frontend,
+`pocket_tts/models/text_chunking.py`:
+
+```python
+# Make sure it starts with an uppercase letter
+if not text[0].isupper():
+    text = text[0].upper() + text[1:]
+```
+
+Right for the Latin-script languages pocket-tts shipped with. Wrong here,
+because in this model the Latin letters *are* phonemes. What actually reached
+the tokenizer:
+
+```
+in  : 'man be bAzAr raftam'
+out : '⁇ an be bAzAr raftam ⁇.'      tokens ['▁?', '?', '▁', 'an', '▁be', ...]
+in  : 'salAm hAle SomA Cetor ?ast'
+out : 'SalAm hAle SomA Cetor ?ast ⁇.' tokens ['▁S', 'al', 'Am', ...]
+in  : '?emruz man be bAzAr raftam'
+out : '?emruz man be bAzAr raftam ⁇.' tokens unchanged
+```
+
+`M` is not in the 4000-entry phoneme vocabulary, so `man` became the unknown
+token and was not spoken at all. `S` *is* in the vocabulary — it is the symbol
+for *sh* — so `salAm` was faithfully rendered as /shalaam/. And `"?".upper()`
+is `"?"`, so any word beginning with a glottal stop passed through untouched.
+That last detail is why the defect looked lexical rather than systematic, and
+why every carrier word we tried happened to fix it: `?emruz` starts with `?`.
+
+### Why the evaluation never caught it
+
+`eval_fa.py` tokenizes the text itself and calls the model directly. It never
+goes through `prepare_text_prompt`. So the evaluation measured a model that was
+fine while `synthesize.py` shipped one that was not, and the two disagreed for
+months without either being wrong about what it measured.
+
+**Any metric that does not run the shipping entry point is not measuring the
+shipped system.**
+
+### The fix, and what it recovered
+
+`capitalize_first_letter` is now a config flag, false for both phoneme configs
+along with `append_terminal_punctuation` and `pad_with_spaces_for_short_inputs`.
+First word correct, 10 words x 5 seeds, each word once in first position and
+once behind a carrier, same weights and prompt in one process:
+
+| | first position | behind a carrier |
+|---|---|---|
+| shipping path, before | 5 / 50 | 46 / 50 |
+| shipping path, after | **40 / 50** | 46 / 50 |
+
+End to end through `synthesize.py`, three seeds each: `man be bAzAr raftam` ->
+*من به بازار رفتم* 3/3, `salAm hAle SomA Cetor ?ast` -> *سلام حال شما چطور است؟*
+3/3. Both were wrong every single time before.
+
+### The residual, which is real but much smaller
+
+A genuine first-position weakness remains, and v1 has it worse. Measured
+through the evaluation path, which never had the frontend bug:
+
+| | first position | behind a carrier |
+|---|---|---|
+| v1 student | 27 / 50 | 47 / 50 |
+| v2 student | 39 / 50 | 47 / 50 |
+
+`_choose_cut` draws from `range(1, len(words))`, so an aligned training target
+never begins at the first word: starting a phrase cold is a position the model
+barely sees. v2's gap is 2.5x smaller than v1's, and v2 is the only one of the
+two with word-initial targets at all -- 31.4% of its rows carry no alignment
+and so start at word 0, against 0% for v1. That is correlational, not proven.
+`data.word0_prob` now exists to test it properly: it starts a configurable
+share of aligned targets at the first word and draws the voice prompt from
+another utterance by the same speaker.
+
+### What this cost
+
+The onset theory in the section below was wrong, and so were two other
+diagnoses. The bill: 119 hours of audio dropped, three corpus re-preps, a
+12,000-step fine-tune whose result was uninformative because it was a
+distillation run against a teacher that carried the same defect, and a long
+diagnostic session. What finally worked was printing the string the tokenizer
+actually received, which cost nothing and should have been the first step.
+
+
+---
+
+## Two more wrong turns
 
 **The onset theory was not the cause of what we heard.** Utterance-initial
 consonants came out damaged — `man` as `in`, `salAm` as `shlaam` — and the
@@ -218,6 +311,12 @@ always look broken.
 **Preserve checkpoints.** `num_ckpt_keep: 3` on the teacher config would have
 left only the last three — and the best checkpoint was 125,000 steps earlier. A
 loop copying every 25,000th aside cost 25 GB and saved the run's best model.
+
+**Evaluate through the shipping entry point, at least once.** The evaluation
+here tokenized text itself and called the model directly, so it never executed
+the text frontend that was deleting the first word of every utterance. The
+numbers were right and the product was broken, and nothing in the harness could
+have told us.
 
 **Chain the evaluation to the training job, on the machine.** It then needs
 neither a live laptop session nor credentials that expire mid-run.

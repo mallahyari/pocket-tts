@@ -38,6 +38,8 @@ Phonemise first with
 import torch
 from transformers import AutoTokenizer, T5ForConditionalGeneration
 
+from normalize_fa import normalize_for_model   # shipped in this repo
+
 G2P = "mehdi-hf/Homo-GE2PE-Persian-HF"
 tok = AutoTokenizer.from_pretrained(G2P)
 g2p = T5ForConditionalGeneration.from_pretrained(G2P).eval()
@@ -45,7 +47,13 @@ g2p = T5ForConditionalGeneration.from_pretrained(G2P).eval()
 TO_PHONEMES = str.maketrans({"/": "a", "a": "A", "@": "?", "$": "S", "c": "C"})
 
 def phonemise(text: str) -> str:
-    # "؟" shares a symbol with the glottal stop in this notation; drop it first
+    # Normalise FIRST. G2P has no reading for digits and drops them without a
+    # word: "تا سال ۲۰۳۰" comes back as "tA sAle  " with the year simply gone.
+    # normalize_fa.py (shipped in this repo) spells numbers out, unifies the
+    # Arabic/Persian letter variants and strips the characters the tokenizer
+    # has no entry for.
+    text = normalize_for_model(text)
+    # "؟" shares a symbol with the glottal stop in this notation; drop it next
     text = text.replace("؟", "").replace("?", "")
     enc = tok([text], add_special_tokens=False, return_tensors="pt")
     with torch.no_grad():
@@ -55,7 +63,26 @@ def phonemise(text: str) -> str:
 
 phonemise("سلام، حال شما چطور است؟")
 # 'salAm hAle SomA Cetor ?ast'
+phonemise("تا سال ۲۰۳۰ تغییر دهد.")
+# 'tA sAle do hezAr ?o si taqir dahad'
 ```
+
+### The config must switch off the orthographic text frontend
+
+`model.yaml` in this repo carries three flags, and they matter:
+
+```yaml
+capitalize_first_letter: false
+append_terminal_punctuation: false
+pad_with_spaces_for_short_inputs: false
+```
+
+Without the first one the text frontend upper-cases the opening letter of every
+chunk. That is right for a Latin-script language and wrong here, because these
+Latin letters are phonemes: `man` becomes `Man`, `M` is not in the vocabulary,
+and the first word is silently dropped. `salAm` becomes `SalAm`, and since `S`
+is the symbol for *sh*, the model says /shalaam/. Use the `model.yaml` shipped
+here rather than writing your own.
 
 Then synthesise, passing `--no-normalize-text` so the phonemes survive:
 
@@ -99,6 +126,19 @@ count.
 
 ---
 
+## Samples
+
+`samples/` holds three clips, all cloned from one held-out Common Voice speaker
+the model never trained on:
+
+| file | text |
+|---|---|
+| `hello.wav` | سلام، حال شما چطور است؟ |
+| `short_sentence.wav` | مادر کتاب را روی میز اتاق گذاشت |
+| `news_paragraph.wav` | کریس رایت، وزیر انرژی آمریکا، گفت واشینگتن اقتصاد جمهوری اسلامی را تحت فشار قرار می‌دهد تا سیاست حکومت تغییر کند |
+
+---
+
 ## Training data
 
 | source | hours | share |
@@ -121,11 +161,17 @@ mark otherwise becomes a glottal stop the speaker never uttered.
 
 ## Known limitations
 
-**The first word of each chunk is the weak point.** Utterance-initial
-consonants are sometimes softened or dropped — `کریس` can render as `ریس`,
-`من` as `این`. Long text is split into chunks of ~18 tokens and each chunk is
-generated fresh, so this recurs at every boundary. Words with a glottal-stop
-onset (`?emruz`, `?in`) are reliably clean.
+**The first word of a chunk is still the weak point, mildly.** With the config
+above, the opening word is rendered correctly about 40 times in 50, against 46
+in 50 for the same word one position later. An initial stop consonant is what
+slips: `کریس` occasionally comes out as `پریس`. This is a property of the
+training recipe, where a target almost never begins at the first word of an
+utterance, and v1 has it more severely (27 in 50). Words with a glottal-stop
+onset are reliably clean.
+
+If you are generating long text, note that it is split into chunks of ~18
+tokens and each chunk is generated fresh, so the first-word position recurs at
+every boundary.
 
 **Voice prompt choice matters a lot.** Some prompts produce stable output while
 others cause the model to continue the prompt's own speech instead of the

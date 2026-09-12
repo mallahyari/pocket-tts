@@ -23,6 +23,7 @@ class Entry:
     words: list[dict[str, Any]] | None = None  # [{"word", "start", "end"}] from align_data
     start: float = 0.0  # offset of the utterance inside the audio file (long recordings)
     latents_file: str | None = None
+    speaker: str | None = None
 
 
 @dataclass

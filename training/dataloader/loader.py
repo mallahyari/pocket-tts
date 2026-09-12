@@ -60,6 +60,7 @@ class DataLoader:
         seed: int = 0,
         shuffle: bool = True,
         io_workers: int = 16,
+        word0_prob: float = 0.0,
     ):
         self.jsonl = jsonl
         self.entries = load_entries(jsonl, rank, world_size)
@@ -71,8 +72,16 @@ class DataLoader:
         self.max_voice_prompt_sec = max_voice_prompt_sec
         self.shuffle = shuffle
         self.io_workers = io_workers
+        # Fraction of aligned samples whose target starts at the FIRST word,
+        # with the voice prompt taken from another utterance by the same
+        # speaker.  _choose_cut only ever cuts between two words, so without
+        # these the model never learns to begin a phrase cold: at inference a
+        # phrase-initial stop consonant is out of distribution and gets eaten
+        # (man -> "an", pedar -> "edar").  Measured on both v1 and v2.
+        self.word0_prob = word0_prob
         self._failures = 0
         self.rng = random.Random(seed)
+        self._by_speaker: dict[str, list[int]] | None = None
         self.frame_size = int(sample_rate / frame_rate)
         meta_path = Path(jsonl).with_suffix(".meta.json")
         self.stitch_frames = 0
@@ -137,10 +146,10 @@ class DataLoader:
         cut, i = self.rng.choice(cuts)
         return cut, " ".join(w["word"] for w in entry.words[i:])
 
-    def _sample(self, entry: Entry) -> tuple[Any, ...]:
+    def _sample(self, entry: Entry, index: int = -1) -> tuple[Any, ...]:
         """(wav, tokens, prompt wav, prompt samples), or _sample_latent's tuple."""
         if entry.latents_file is not None:
-            return self._sample_latent(entry)
+            return self._sample_latent(entry, index)
         chosen = self._choose_cut(entry)
         if chosen is not None:
             cut, text = chosen
@@ -187,6 +196,10 @@ class DataLoader:
             return f.get_tensor("latents")
 
     def _latent_cut(self, entry: Entry, stored: int) -> tuple[int, str]:
+        if entry.words and self.word0_prob > 0 and self.rng.random() < self.word0_prob:
+            # cut_frames == 0 is what makes _sample_latent draw the prompt from
+            # a different utterance; the target is then the whole window.
+            return 0, " ".join(w["word"] for w in entry.words)
         chosen = self._choose_cut(entry)
         if chosen is None or stored <= 1:
             return 0, entry.transcript
@@ -215,7 +228,7 @@ class DataLoader:
         start = self.rng.randint(0, max(0, stored - cap))
         return lat[start : start + cap]
 
-    def _sample_latent(self, entry: Entry) -> tuple[Any, ...]:
+    def _sample_latent(self, entry: Entry, index: int = -1) -> tuple[Any, ...]:
         """(stitch wav, tokens, prompt latents, tail latents, target frames)."""
         assert self.stitch_frames > 0, f"{entry.path}: latents entry but no meta file loaded"
         assert entry.latents_file is not None, f"{entry.path}: not a latents entry"
@@ -231,7 +244,12 @@ class DataLoader:
             self.sample_rate,
         )
         tail = lat[cut_frames + stitch_frames : cut_frames + target_frames]
-        return stitch, tokens, self._latent_prompt(lat, cut_frames), tail, target_frames
+        prompt_lat = lat
+        if cut_frames == 0:
+            peer = self._other_utterance_latents(entry, index)
+            if peer is not None:
+                prompt_lat = peer
+        return stitch, tokens, self._latent_prompt(prompt_lat, cut_frames), tail, target_frames
 
     @staticmethod
     def _pad_latents(seqs: tuple[torch.Tensor, ...], min_len: int) -> torch.Tensor:
@@ -262,6 +280,48 @@ class DataLoader:
             prompt_latents=self._pad_latents(prompts, 1),
         )
 
+    def _speaker_index(self) -> dict[str, list[int]]:
+        """speaker -> entry indices, built once on first use.
+
+        Needed only by the no-alignment path, which would otherwise cut its
+        voice prompt out of the very audio it is asked to generate.
+        """
+        if self._by_speaker is None:
+            index: dict[str, list[int]] = {}
+            for i in range(len(self.entries)):
+                spk = self.get_entry(i).speaker
+                if spk:
+                    index.setdefault(spk, []).append(i)
+            self._by_speaker = index
+        return self._by_speaker
+
+    def _other_utterance_latents(self, entry: Entry, index: int) -> torch.Tensor | None:
+        """Latents of a different utterance by the same speaker, or None.
+
+        Without alignment there is no cut, so the prompt cannot be the part of
+        the utterance before it. Taking a random window of the *same* audio
+        instead puts the answer inside the prompt: the model learns it can
+        reproduce what it just heard, and at inference -- where the prompt is
+        unrelated -- it opens by trying to continue the prompt. That is the
+        damaged first word. Same speaker, different utterance, so the prompt
+        still determines the voice and nothing else.
+        """
+        peers = self._speaker_index().get(entry.speaker or "", ())
+        if len(peers) < 2:
+            return None
+        for _ in range(4):
+            j = peers[self.rng.randrange(len(peers))]
+            if j == index:
+                continue
+            other = self.get_entry(j)
+            if not other.latents_file:
+                continue
+            try:
+                return self._load_latents(other.latents_file)
+            except Exception:  # noqa: BLE001 -- a missing peer is not fatal
+                continue
+        return None
+
     def get_entry(self, index: int) -> Entry:
         d = json.loads(self.entries[index])
         return Entry(
@@ -271,11 +331,13 @@ class DataLoader:
             d.get("words"),
             float(d.get("start", 0.0)),
             d.get("latents_file"),
+            d.get("speaker"),
         )
 
-    def _sample_or_none(self, entry: Entry) -> tuple[Any, ...] | None:
+    def _sample_or_none(self, item: tuple[int, Entry]) -> tuple[Any, ...] | None:
+        index, entry = item
         try:
-            return self._sample(entry)
+            return self._sample(entry, index)
         except Exception as exc:  # noqa: BLE001 — skip unreadable samples, whatever the cause
             self._failures += 1
             if self._failures % 1000 == 1:
@@ -311,7 +373,9 @@ class DataLoader:
                 # Parse sequentially, outside the pool: get_entry is GIL-bound
                 # (unlike sphn's audio reads), so parsing it on the worker
                 # threads just contends with itself instead of overlapping.
-                chunk_entries = [self.get_entry(i) for i in chunk]
+                # (index, entry): _sample_latent needs the index to pick a
+                # different utterance by the same speaker for the voice prompt.
+                chunk_entries = [(i, self.get_entry(i)) for i in chunk]
                 got = [s for s in pool.map(self._sample_or_none, chunk_entries) if s is not None]
                 samples.extend(got)
                 if len(samples) < self.batch_size:

@@ -23,6 +23,10 @@ class DataArgs:
     # so prompts vary in length and the target keeps most of the utterance.
     # <= 0 removes the window (any word boundary; full-prefix prompt).
     max_voice_prompt_sec: float = 5.0
+    # Share of aligned samples that start the target at the first word, with a
+    # same-speaker peer utterance as the voice prompt. 0.0 reproduces the
+    # original recipe, which only ever cuts mid-utterance.
+    word0_prob: float = 0.0
     shuffle: bool = True
     # Loader subprocesses per rank. Each one is GIL-bound at ~90 samples/s from
     # network storage (extra IO threads do not help), and a rank consumes
