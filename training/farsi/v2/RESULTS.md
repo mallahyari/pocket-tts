@@ -142,9 +142,52 @@ containing v1's own training data. Only numbers on this held-out set compare.
 
 ## Student results
 
-*Pending — distillation from the step-275,000 teacher is running.* The question
-it answers is whether distillation buys back the accuracy gap without giving up
-the stability advantage.
+Depth-distilled from the step-275,000 teacher into the 6-layer student: 200,000
+steps, batch 16, 8×H100, 3.5 h at 15.7 it/s, no failures. Held-out `distill_mse`
+fell from 0.0362 to 0.0220 and was still descending at the end — v1's equivalent
+run finished at 0.0367, so v2's student *starts* below where v1's ended.
+
+Evaluated on the same 300 held-out Common Voice pairs, `--cfg 1.0` (a distilled
+student has guidance baked in):
+
+| student step | WER | speaker sim | UTMOS | runaways |
+|---|---|---|---|---|
+| 22,500 | 0.740 | 0.854 | 3.143 | 2 |
+| 92,500 | 0.669 | **0.869** | 3.128 | 3 |
+| 102,500 | 0.799 | 0.859 | **3.167** | 5 |
+| 132,500 | 0.788 | 0.847 | 3.072 | 6 |
+| **142,500** | **0.528** | 0.867 | 3.090 | **0** |
+| 152,500 | 0.572 | 0.859 | 3.110 | 1 |
+| 172,500 | 0.541 | 0.866 | 3.131 | 1 |
+| 192,500 | 0.550 | 0.867 | 3.107 | 1 |
+
+**The student improves late, where the teacher degraded late.** Everything from
+142,500 on beats everything before it. v1's student did the same thing: it
+peaked at 100k on the in-training set but at 200k on held-out speakers.
+
+### The comparison that matters
+
+v1's shipped student against v2's, identical set, identical metric, median
+per-item WER with a count of items above WER 1.0:
+
+| | median | mean | runaways / 300 | speaker sim | UTMOS |
+|---|---|---|---|---|---|
+| v1 shipped | 0.333 | 2.048 | 25 | 0.764 | 2.826 |
+| **v2 @172,500** | **0.333** | **0.646** | **8** | **0.866** | **3.131** |
+| v2 @152,500 | 0.358 | 0.659 | **7** | 0.859 | 3.110 |
+
+**Level on median accuracy, three times better on mean WER, three times fewer
+runaways.** The median being equal says a typical utterance is about as accurate
+as v1's. The mean and runaway counts collapsing says the catastrophic failures —
+the model running past the end of the text, repeating itself, drifting into the
+prompt's words — largely stop. That is the difference a listener notices.
+
+Speaker similarity rises from 0.764 to 0.866 and UTMOS from 2.83 to 3.13, which
+is consistent with a corpus carrying 2,978 speakers instead of 1,100.
+
+*Repeat-seed confirmation of the top four checkpoints is in progress; the
+teacher sweep showed single runs can swing by 0.6 WER, so the final choice waits
+on that.*
 
 ---
 
