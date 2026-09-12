@@ -49,6 +49,7 @@ class SubprocessDataLoader:
         seed: int = 0,
         shuffle: bool = True,
         io_workers: int = 16,
+        word0_prob: float = 0.0,
         num_procs: int = 6,
         depth: int = 8,
     ):
@@ -68,6 +69,7 @@ class SubprocessDataLoader:
                 "seed": seed + rank * num_procs + i,
                 "shuffle": shuffle,
                 "io_workers": io_workers,
+                "word0_prob": word0_prob,
             }
             proc = ctx.Process(
                 target=_feed_queue,

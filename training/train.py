@@ -188,6 +188,7 @@ def main(config_path: str):
             # permutation from the top and bias coverage toward its head.
             seed=args.seed + start_step,
             shuffle=args.data.shuffle,
+            word0_prob=args.data.word0_prob,
             num_procs=args.data.loader_procs,
         )
     )
