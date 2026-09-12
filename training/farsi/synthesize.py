@@ -44,6 +44,23 @@ HARD_BREAK = re.compile(r"(?<=[.!؟])\s+")
 SOFT_BREAK = re.compile(r"(?<=[،؛:])\s+")
 BREAK_CHARS = (".", "!", "؟", "،", "؛", ":")
 
+# Homo-GE2PE marks the ezafe with a trailing "1": "@eqtesade1 @amrika" is
+# eqtesad-E amrika, one phrase. The model never sees the mark -- it is stripped
+# before tokenizing, exactly as the training corpus stripped it -- but the
+# splitter needs it. Without it a chunk boundary can land between a word and
+# the complement its ezafe binds it to, which is audible as a gap in the middle
+# of a noun phrase. Text carrying no "1" behaves exactly as before.
+EZAFE_MARK = "1"
+
+
+def strip_ezafe(text: str) -> str:
+    """The text as the model must see it: no ezafe marks."""
+    return text.replace(EZAFE_MARK, "")
+
+
+def _binds_to_next(word: str) -> bool:
+    return word.endswith(EZAFE_MARK)
+
 # A generation that never emits EOS runs to pocket-tts's internal length cap, so
 # its duration lands exactly at that cap. Measured on 25 held-out utterances:
 # healthy generations came out at <=0.92 of the cap, runaways at >=1.03. Anything
@@ -138,6 +155,30 @@ def generate_chunk(
     return np.concatenate(parts)
 
 
+
+def _pack(words, count_tokens, fits, n_chunks: int, target: int) -> list[str]:
+    """Greedy pack aiming at `target` tokens, with `max_tokens` still a hard stop.
+
+    Chunks are closed on the target only while more are owed; the last one
+    absorbs whatever is left, so the tail never starves.
+    """
+    out: list[str] = []
+    cur = ""
+    for word in words:
+        trial = f"{cur} {word}".strip()
+        owed = len(out) < n_chunks - 1
+        # Never close after a word whose ezafe binds it to this one.
+        bound = bool(cur) and _binds_to_next(cur.split()[-1])
+        if cur and not bound and (not fits(trial) or (owed and count_tokens(trial) > target)):
+            out.append(cur)
+            cur = word
+        else:
+            cur = trial
+    if cur:
+        out.append(cur)
+    return out
+
+
 def split_text(
     text: str,
     count_tokens,
@@ -174,18 +215,26 @@ def split_text(
             parts = split_by(pattern, piece)
             if parts:
                 return [c for p in parts for c in recurse(p)]
-        # No punctuation left: pack words greedily.
-        out, cur = [], ""
-        for word in piece.split():
-            trial = f"{cur} {word}".strip()
-            if cur and not fits(trial):
-                out.append(cur)
-                cur = word
-            else:
-                cur = trial
-        if cur:
-            out.append(cur)
-        return out
+        # No punctuation left, so pack by words. Packing greedily to the budget
+        # fills early chunks and leaves whatever is left over as a tail: 36
+        # tokens at a budget of 18 came out 16/18/2, and that 2-token tail is
+        # far outside the ~11-token training distribution -- it ran past EOS
+        # and invented words. Decide the chunk count first, then aim for even
+        # chunks, which needs no more chunks than greedy and has no tail.
+        words = piece.split()
+        total = count_tokens(piece)
+        n_chunks = max(1, math.ceil(total / max_tokens))
+        # Word boundaries make the ideal count optimistic: 36 tokens at a
+        # budget of 18 looks like two chunks, but the first fills at 16 and 20
+        # are left over, which no single chunk may hold. Pack, and if it needed
+        # another chunk, aim again at the count it actually took so the tokens
+        # spread evenly instead of leaving a starved tail.
+        for _ in range(4):
+            chunks = _pack(words, count_tokens, fits, n_chunks, math.ceil(total / n_chunks))
+            if len(chunks) <= n_chunks:
+                return chunks
+            n_chunks = len(chunks)
+        return chunks
 
     if keep_punct_boundaries:
         pieces = [text]
@@ -214,6 +263,26 @@ def split_text(
             merged[-1] = f"{merged[-1]} {chunk}"
         else:
             merged.append(chunk)
+
+    # Greedy packing leaves a runt whenever the text does not divide evenly:
+    # 36 tokens at a budget of 18 comes out 16/18/2, and the 2-token tail
+    # cannot merge back because 18+2 exceeds the budget. That tail is far
+    # outside the ~11-token training distribution and renders badly, and the
+    # seam in front of it lands mid-phrase -- it split تغییر from دهد, and the
+    # inserted join silence made the gap audible. Pull words back from the
+    # neighbour until both sides clear min_tokens.
+    for i in range(len(merged) - 1, 0, -1):
+        if count_tokens(merged[i]) >= min_tokens:
+            continue
+        if merged[i - 1].rstrip().endswith(BREAK_CHARS):
+            continue  # a real punctuation boundary is not ours to move
+        while count_tokens(merged[i]) < min_tokens:
+            words = merged[i - 1].split()
+            # Never rob the neighbour below the same floor.
+            if len(words) < 2 or count_tokens(" ".join(words[:-1])) < min_tokens:
+                break
+            merged[i - 1] = " ".join(words[:-1])
+            merged[i] = f"{words[-1]} {merged[i]}"
     return merged
 
 
@@ -297,7 +366,10 @@ def main(
     # frames_after_eos is a generate_audio argument, not a load_model one.
     model = TTSModel.load_model(config=config, temp=temperature, eos_threshold=eos_threshold)
     sp = model.flow_lm.conditioner.tokenizer.sp
-    chunks = split_text(raw, lambda s: len(sp.encode(s)), max_tokens, pause_at_punct, min_tokens)
+    # Token counts, and everything the model is given, exclude the ezafe marks.
+    chunks = split_text(
+        raw, lambda s: len(sp.encode(strip_ezafe(s))), max_tokens, pause_at_punct, min_tokens
+    )
     logger.info(f"{len(chunks)} chunk(s)")
 
     sample_rate = int(model.mimi.sample_rate)
@@ -321,10 +393,11 @@ def main(
         # Full chunk text -- truncating this preview once made it look like
         # words were being dropped from generation when they were only being
         # dropped from the printed preview.
-        logger.info(f"[{i}/{len(chunks)}] {len(sp.encode(chunk))} tokens: {chunk}")
+        spoken = strip_ezafe(chunk)
+        logger.info(f"[{i}/{len(chunks)}] {len(sp.encode(spoken))} tokens: {spoken}")
         pieces.append(
             generate_chunk(
-                model, state, chunk, frames_after_eos=frames_after_eos, sample_rate=sample_rate
+                model, state, spoken, frames_after_eos=frames_after_eos, sample_rate=sample_rate
             )
         )
         if i < len(chunks):

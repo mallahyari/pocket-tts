@@ -959,3 +959,57 @@ def test_merge_refuses_when_either_half_is_unrepaired(tmp_path: Path) -> None:
     # v1_onset absent
     with pytest.raises(prep.typer.Exit):
         prep.step_merge(p)
+
+
+def test_split_text_leaves_no_starved_tail():
+    """Greedy packing left a runt the budget could not merge back.
+
+    36 tokens at a budget of 18 came out 16/18/2: the 2-token tail could not
+    rejoin because 18+2 exceeds the budget, and `min_tokens` never enforced a
+    floor -- it was only consulted at punctuation boundaries. That tail is far
+    outside the ~11-token distribution the model was trained on; in practice it
+    ran past end-of-speech and appended invented words.
+    """
+    from training.farsi.synthesize import split_text
+
+    text = " ".join(["کلمه"] * 36)
+    chunks = split_text(text, _fake_count, max_tokens=18, min_tokens=8)
+    assert all(_fake_count(c) >= 8 for c in chunks), [_fake_count(c) for c in chunks]
+    assert " ".join(chunks).split() == text.split()
+
+
+def test_split_text_spreads_tokens_evenly():
+    """Chunk sizes should be close together, not full-full-scrap."""
+    from training.farsi.synthesize import split_text
+
+    chunks = split_text(" ".join(["کلمه"] * 36), _fake_count, max_tokens=18, min_tokens=8)
+    sizes = [_fake_count(c) for c in chunks]
+    assert max(sizes) - min(sizes) <= 2, sizes
+
+
+def test_split_text_never_breaks_an_ezafe_pair():
+    """`1` marks the ezafe: "?eqtesAde1 ?AmrikA" is one bound phrase.
+
+    Splitting between them is audible as a gap in the middle of a noun phrase.
+    The mark is a splitter hint only -- strip_ezafe removes it before the model
+    sees the text, exactly as the training corpus had it removed.
+    """
+    from training.farsi.synthesize import split_text, strip_ezafe
+
+    words = ["yek", "do", "se", "CahAr", "panj", "?eqtesAde1", "?AmrikA", "haft", "haSt"]
+    chunks = split_text(" ".join(words), _fake_count, max_tokens=3, min_tokens=1)
+    for c in chunks:
+        assert not c.rstrip().endswith("1"), f"chunk ends on an ezafe: {c!r}"
+    joined = " ".join(chunks)
+    assert "?eqtesAde1 ?AmrikA" in joined
+    assert strip_ezafe(joined).split() == [w.replace("1", "") for w in words]
+
+
+def test_strip_ezafe_is_a_noop_without_marks():
+    from training.farsi.synthesize import split_text, strip_ezafe
+
+    text = " ".join(["kalame"] * 20)
+    assert strip_ezafe(text) == text
+    assert split_text(text, _fake_count, max_tokens=6) == split_text(
+        text, _fake_count, max_tokens=6
+    )

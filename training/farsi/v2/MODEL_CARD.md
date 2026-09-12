@@ -59,10 +59,16 @@ def phonemise(text: str) -> str:
     with torch.no_grad():
         out = g2p.generate(**enc, num_beams=5, max_length=512, early_stopping=True)
     raw = tok.batch_decode(out, skip_special_tokens=True)[0].strip()
-    return raw.translate(TO_PHONEMES).replace("1", "")
+    # KEEP the "1": it marks the ezafe. "?eqtesAde1 ?AmrikA" is eqtesad-E
+    # amrika, one bound phrase. synthesize.py uses it to avoid splitting a
+    # chunk between the two, then strips it before the model sees the text.
+    # If you drive the model yourself, strip it: .replace("1", "")
+    return raw.translate(TO_PHONEMES)
 
 phonemise("سلام، حال شما چطور است؟")
 # 'salAm hAle SomA Cetor ?ast'
+phonemise("اقتصاد آمریکا را تغییر دهد")
+# '?eqtesAde1 ?AmrikA rA taqir dahad'   <- the 1 is the ezafe
 phonemise("تا سال ۲۰۳۰ تغییر دهد.")
 # 'tA sAle do hezAr ?o si taqir dahad'
 ```
@@ -172,6 +178,13 @@ onset are reliably clean.
 If you are generating long text, note that it is split into chunks of ~18
 tokens and each chunk is generated fresh, so the first-word position recurs at
 every boundary.
+
+**There is no punctuation in this model's vocabulary.** Not one of the 4000
+pieces contains a comma or a full stop: the G2P discards punctuation, so the
+training text was pure phonemes. You cannot request a pause through the text,
+and `--pause-at-punct` has nothing to act on. Phrasing is entirely the model's
+own. Keeping the ezafe marks (above) is what stops a chunk boundary landing
+inside a noun phrase, which is the one lever you do have.
 
 **Voice prompt choice matters a lot.** Some prompts produce stable output while
 others cause the model to continue the prompt's own speech instead of the
