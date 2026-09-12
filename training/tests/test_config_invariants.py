@@ -137,3 +137,54 @@ def test_teacher_inference_config_matches_the_trained_depth():
 
     # and it must still be the phoneme tokenizer, not v1's
     assert "_ph" in str(teacher.flow_lm.lookup_table.tokenizer_path)
+
+
+def test_phoneme_configs_disable_the_orthographic_text_frontend():
+    """A phoneme model must not have its text capitalised before generation.
+
+    `prepare_text_prompt` upper-cases the first letter of every chunk, which is
+    right for the Latin-script languages pocket-tts shipped with and wrong here:
+    the Latin letters are phonemes. `man` becomes `Man`, and `M` is not in the
+    4000-entry phoneme vocabulary, so the first word tokenizes to the unknown
+    token and is simply not spoken. Worse, where a capital *is* a phoneme it
+    changes the sound silently: `salAm` -> `SalAm` is /salaam/ -> /shalaam/,
+    because `S` is the symbol for sh.
+
+    This shipped. Every generation lost or mangled its first word, and the bug
+    was invisible to the evaluation, which tokenizes the text itself and never
+    goes through this frontend. Words beginning with a glottal stop hid it
+    further, since "?".upper() is "?".
+    """
+    from pocket_tts.utils.config import load_config
+
+    root = Path(__file__).resolve().parents[1] / "farsi" / "configs"
+    for name in ("model_farsi_ph.yaml", "model_farsi_ph_teacher.yaml"):
+        cfg = load_config(str(root / name))
+        assert not cfg.capitalize_first_letter, (
+            f"{name}: capitalize_first_letter must be false for a phoneme model"
+        )
+        assert not cfg.append_terminal_punctuation, (
+            f"{name}: the phoneme vocabulary has no terminal punctuation to append"
+        )
+        assert not cfg.pad_with_spaces_for_short_inputs, (
+            f"{name}: leading spaces are out of distribution for this model"
+        )
+
+
+def test_capitalising_a_phoneme_prompt_destroys_the_first_word():
+    """Pin the mechanism itself, not just the flag that disables it."""
+    from pocket_tts.models.text_chunking import prepare_text_prompt
+
+    on, _ = prepare_text_prompt("man be bAzAr raftam", False, False, False, True)
+    off, _ = prepare_text_prompt("man be bAzAr raftam", False, False, False, False)
+    assert on.startswith("Man"), "upstream behaviour changed; this test is stale"
+    assert off == "man be bAzAr raftam"
+
+    # "S" is sh, so capitalising silently swaps the phoneme rather than
+    # producing an unknown one -- the failure that sounded like a lisp.
+    assert prepare_text_prompt("salAm", False, False, False, True)[0] == "SalAm"
+    assert prepare_text_prompt("salAm", False, False, False, False)[0] == "salAm"
+
+    # A glottal-initial word is unchanged either way, which is why the defect
+    # looked like it only hit some words.
+    assert prepare_text_prompt("?emruz man", False, False, False, True)[0] == "?emruz man"

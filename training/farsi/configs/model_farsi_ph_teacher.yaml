@@ -49,6 +49,16 @@ weights_path: hf://kyutai/pocket-tts/languages/english/model.safetensors@39592ff
 # Sampling temperature the CLI uses by default; re-tune it on your own
 # checkpoints (0.3 is the English model's, 0.7 the other languages').
 default_temperature: 0.3
+# The Latin letters here are phonemes, not spelling, so the shipping text
+# frontend's orthographic tidy-up must be off. Capitalising the first letter
+# rewrites the first word's onset: "man" -> "Man" is an unknown token (the
+# first word is simply lost) and "salAm" -> "SalAm" is /salaam/ -> /shalaam/,
+# because S *is* the symbol for sh. Appending terminal punctuation likewise
+# adds a token this vocabulary does not have.
+capitalize_first_letter: false
+append_terminal_punctuation: false
+pad_with_spaces_for_short_inputs: false
+
 
 
 flow_lm:

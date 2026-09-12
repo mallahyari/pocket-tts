@@ -98,6 +98,7 @@ class TTSModel(nn.Module):
         model_recommended_frames_after_eos: int | None = None,
         remove_semicolons: bool = False,
         append_terminal_punctuation: bool = True,
+        capitalize_first_letter: bool = True,
     ):
         super().__init__()
         self.flow_lm = flow_lm
@@ -112,6 +113,7 @@ class TTSModel(nn.Module):
         self.model_recommended_frames_after_eos = model_recommended_frames_after_eos
         self.remove_semicolons = remove_semicolons
         self.append_terminal_punctuation = append_terminal_punctuation
+        self.capitalize_first_letter = capitalize_first_letter
 
     @property
     def device(self) -> torch.device:
@@ -148,6 +150,7 @@ class TTSModel(nn.Module):
             model_recommended_frames_after_eos=config.model_recommended_frames_after_eos,
             remove_semicolons=config.remove_semicolons,
             append_terminal_punctuation=config.append_terminal_punctuation,
+            capitalize_first_letter=config.capitalize_first_letter,
         )
         return tts_model
 
@@ -674,6 +677,7 @@ class TTSModel(nn.Module):
             self.pad_with_spaces_for_short_inputs,
             remove_semicolons=self.remove_semicolons,
             append_terminal_punctuation=self.append_terminal_punctuation,
+            capitalize_first_letter=self.capitalize_first_letter,
         )
 
         for chunk in chunks:
@@ -682,6 +686,7 @@ class TTSModel(nn.Module):
                 self.pad_with_spaces_for_short_inputs,
                 self.remove_semicolons,
                 self.append_terminal_punctuation,
+                self.capitalize_first_letter,
             )
             frames_after_eos_guess += 2
             effective_frames = (
