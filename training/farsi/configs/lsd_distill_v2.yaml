@@ -1,0 +1,60 @@
+# v2 Farsi student: depth-distil the 24-layer teacher into the 6-layer model that
+# actually ships (the one that runs on a CPU at 6x real time).
+#
+# Same d_model as the teacher, so the flow head and every non-backbone tensor
+# is copied over and frozen; only the backbone learns. distill_cfg_coef 2.0
+# bakes classifier-free guidance in, so the student generates at --cfg 1 with
+# one backbone pass per step.
+model_config: training/farsi/configs/model_farsi_ph.yaml   # 6-layer student, phoneme tokenizer
+start_from_pretrained: false
+distill_cfg_coef: 2.0
+distill_teacher_config: training/farsi/configs/model_farsi_ph.yaml
+distill_teacher_overrides:
+  flow_lm.transformer.num_layers: 24
+# WHICH TEACHER: fill this in from the eval, do not default to the last step.
+# v1's teacher bottomed out at step 135k and then degraded for 265k more; its
+# final checkpoint was the worst validation loss of its whole run, and that is
+# the one v1 distilled from. after_training.sh evaluates the final export plus
+# the preserved 25k checkpoints in runs/lsd_scratch_v2/keep/ so this can be
+# chosen on WER rather than by position.
+distill_teacher_weights: runs/lsd_scratch_v2/checkpoint_00400000.pt
+
+data:
+  train_jsonl: data/farsi_600h/v2_train_ph_latents.jsonl
+  valid_jsonl: data/farsi_600h/v2_valid_ph.jsonl
+  max_duration_sec: 30.0
+  max_voice_prompt_sec: 5.0
+
+flow:
+  type: lsd
+  kwargs: {}
+
+flow_batch_multiplier: 4
+# No CFG dropout: the teacher's targets are always fully conditioned and the
+# student is never run with a null branch at inference.
+text_dropout: 0.0
+voice_dropout: 0.0
+
+optim:
+  lr: 4e-4
+  schedule: cosine
+  warmup_steps: 1000
+
+run_dir: runs/lsd_distill_v2
+batch_size: 16
+max_steps: 200000  # WER/similarity reach parity by ~40k, but prosody settles late
+ema_decay: 0.9999
+log_freq: 50
+valid_freq: 2500
+ckpt_freq: 2500
+num_ckpt_keep: 999
+# PHONEMES, not Persian script: this tokenizer has no Persian in its vocabulary,
+# so Persian here tokenizes to all-unknown and every sample comes out empty.
+sample_sentences:
+  # سلام، حال شما چطور است؟
+  - "salAm hAle SomA Cetor ?ast"
+  # این صدا هنوز در حال آموزش است و کیفیت آن بهتر خواهد شد.
+  - "?in sedA hanuz dar hAle ?AmuzeS ?ast va keyfiate ?An behtar xAhad Sod"
+  # امروز هوای تهران آفتابی است و دمای هوا به بیست و پنج درجه می‌رسد.
+  - "?emruz havAye tehrAn ?AftAbi ?ast va damAye havA be bist ?o panj daraje mirasad"
+sample_freq: 10000
