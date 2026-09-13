@@ -37,8 +37,11 @@ FRAMES_AFTER_EOS = 0
 DEFAULT_MAX_TOKENS = 18     # ~11 tokens was the training average; 21+ runs past EOS
 DEFAULT_MIN_TOKENS = 8
 DEFAULT_VOICE_SEC = 5.0     # training capped voice prompts at 5 s
-DEFAULT_JOIN_SEC = 0.0
-DEFAULT_PAUSE_SEC = 0.25   # between sentences
+# These are real now. Before chunks were trimmed they each carried 0.5-1.3 s of
+# their own silence, so a join of 0 still left about a second of gap; trimmed, a
+# join of 0 butts the words together with no breath and the seam sounds wrong.
+DEFAULT_JOIN_SEC = 0.15    # at a split made to fit the token budget
+DEFAULT_PAUSE_SEC = 0.30   # at a sentence boundary
 MAX_CHARS = 2000
 SAMPLE_RATE = 24000
 
