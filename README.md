@@ -1,5 +1,7 @@
 # Pocket TTS
 
+*[فارسی / Persian README](README.fa.md)*
+
 > [!TIP]
 > **This fork adds a Farsi (Persian) training pipeline and two finished models.**
 > The current one is **v2**: 109.5M parameters, CPU-only, voice cloning from a
