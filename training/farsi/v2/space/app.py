@@ -187,40 +187,56 @@ def split_phonemes(text: str, max_tokens: int, min_tokens: int = DEFAULT_MIN_TOK
 CLAUSE_SPLIT = re.compile(r"(?<=[،؛:])\s+")
 
 
-def plan_sentence(sent: str, max_tokens: int) -> list[tuple[str, str]]:
+def plan_sentence(sent: str, max_tokens: int, min_tokens: int = DEFAULT_MIN_TOKENS
+                  ) -> list[tuple[str, str]]:
     """One sentence -> [(chunk phonemes, boundary kind)].
 
-    Clauses are phonemised separately and packed whole wherever the budget
-    allows, so a comma becomes the chunk boundary rather than wherever the
-    token count happened to run out. Phonemising per clause is not a
-    compromise: on the sentence this was built for it also fixes an ezafe that
-    the whole-sentence pass ran together ("qAbeltavajohi" -> "qAbele
-    tavajjohi").
+    Clauses are phonemised separately, which keeps G2P context and is where the
+    ezafe marks come from, then packed by word with clause ends as *preferred*
+    break points rather than forced ones. Forcing them produced a 3-token chunk
+    on "سیاست‌های تحریمی، ..." -- against a training average of 11 -- and with
+    almost nothing to say the model continued the voice prompt instead.
+
+    So a clause end only closes a chunk when both sides clear min_tokens. The
+    budget is still a hard stop.
     """
-    out: list[tuple[str, str]] = []
-    cur = ""
+    words: list[tuple[str, bool]] = []          # (word, ends a clause)
     for clause in CLAUSE_SPLIT.split(sent):
         if not clause.strip():
             continue
-        p = phonemise(clause)
-        if _count_tokens(p) > max_tokens:
-            if cur:
+        ws = phonemise(clause).split()
+        words.extend((w, j == len(ws) - 1) for j, w in enumerate(ws))
+    if not words:
+        return []
+
+    joined = " ".join(w for w, _ in words)
+    total = _count_tokens(joined)
+    n_chunks = max(1, math.ceil(total / max_tokens))
+    for _ in range(4):
+        target = math.ceil(total / n_chunks)
+        out: list[tuple[str, str]] = []
+        cur = ""
+        for i, (word, ends_clause) in enumerate(words):
+            trial = f"{cur} {word}".strip()
+            bound = bool(cur) and cur.split()[-1].endswith(EZAFE_MARK)
+            over_budget = _count_tokens(trial) > max_tokens
+            if cur and not bound and over_budget:
+                out.append((cur, "budget"))
+                cur = word
+                continue
+            cur = trial
+            if not ends_clause or i == len(words) - 1:
+                continue
+            rest = _count_tokens(" ".join(w for w, _ in words[i + 1:]))
+            if _count_tokens(cur) >= min_tokens and rest >= min_tokens and _count_tokens(cur) >= target:
                 out.append((cur, "clause"))
                 cur = ""
-            parts = split_phonemes(p, max_tokens)
-            out.extend((c, "clause" if j == len(parts) - 1 else "budget")
-                       for j, c in enumerate(parts))
-            continue
-        trial = f"{cur} {p}".strip()
-        if cur and _count_tokens(trial) > max_tokens:
+        if cur:
             out.append((cur, "clause"))
-            cur = p
-        else:
-            cur = trial
-    if cur:
-        out.append((cur, "clause"))
+        if len(out) <= n_chunks:
+            break
+        n_chunks = len(out)
     return out
-
 
 def _trim_silence(a: np.ndarray, keep_ms: float = 120.0) -> np.ndarray:
     """Cut the silence a generation opens and closes with.
