@@ -221,7 +221,7 @@ def synthesize(
 
 CSS = "#col-container { max-width: 1000px; margin: 0 auto; }"
 
-with gr.Blocks(title="Pocket TTS — Farsi v2", css=CSS) as demo:
+with gr.Blocks(title="Pocket TTS — Farsi v2") as demo:
     with gr.Column(elem_id="col-container"):
         gr.Markdown(
             "# Pocket TTS — Farsi v2\n"
@@ -255,4 +255,4 @@ with gr.Blocks(title="Pocket TTS — Farsi v2", css=CSS) as demo:
         )
 
 if __name__ == "__main__":
-    demo.queue().launch()
+    demo.queue().launch(css=CSS)
