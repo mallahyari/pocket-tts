@@ -73,6 +73,22 @@ phonemise("تا سال ۲۰۳۰ تغییر دهد.")
 # 'tA sAle do hezAr ?o si taqir dahad'
 ```
 
+### Install
+
+`model.yaml` here sets three flags that the released `pocket-tts` package does
+not know about yet, and its config rejects unknown keys — `pip install
+pocket-tts` will fail on this model with
+`ValidationError: capitalize_first_letter — Extra inputs are not permitted`.
+Until the change is upstream, install the fork that carries it:
+
+```bash
+pip install "pocket-tts @ git+https://github.com/mallahyari/pocket-tts@main"
+```
+
+A loud error is deliberate here. The alternative — a config the old package
+accepts — is the old package silently deleting the first word of everything you
+generate, which is the bug those flags exist to fix.
+
 ### The config must switch off the orthographic text frontend
 
 `model.yaml` in this repo carries three flags, and they matter:

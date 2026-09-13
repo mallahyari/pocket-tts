@@ -1,0 +1,13 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.9.1+cpu
+# The released pocket-tts rejects this model's config: it does not know
+# capitalize_first_letter, and the config forbids unknown keys. The fork adds
+# the flag, without which the text frontend deletes the first word of every
+# phoneme prompt.
+pocket-tts @ git+https://github.com/mallahyari/pocket-tts@main
+transformers>=4.44
+sentencepiece
+numpy
+scipy
+typer
+soundfile
