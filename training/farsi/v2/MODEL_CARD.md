@@ -120,31 +120,37 @@ python -m training.farsi.synthesize \
 The notation: `A` long ā, `a` short a, `?` glottal stop (ع/ء), `S` š, `C` č,
 `;` ž, `x` خ, `q` ق/غ.
 
----
+### Long text: split into sentences first
 
-## Results
+G2P discards punctuation, so a phonemised paragraph has no sentence boundaries
+left in it and anything chunking the result cuts on token count alone, landing
+mid-sentence. Split the Persian into sentences first, phonemise each on its
+own, synthesise each, and join with a pause of about 0.25 s:
 
-Measured on 300 held-out Common Voice pairs — speakers and clips the model has
-never seen, no overlap with training. Compared against
-[v1](https://huggingface.co/mehdi-hf/pocket-tts-farsi) evaluated identically.
+```python
+import re
+sentences = [s.strip() for s in re.split(r"(?<=[.!؟])\s+", article) if s.strip()]
+pieces = [synthesise(phonemise(s)) for s in sentences]
+```
 
-| | v1 | **v2** |
-|---|---|---|
-| mean WER | 2.048 | **0.582** |
-| median per-item WER | 0.333 | 0.333 |
-| runaway generations | 25 / 300 | **0–1 / 300** |
-| speaker similarity | 0.764 | **0.859** |
-| UTMOS (naturalness) | 2.826 | **3.11** |
+**Do this for prosody, not for accuracy.** Measured on a five-sentence
+paragraph over three seeds each, the two routes are indistinguishable on word
+error rate — 0.736 median (0.660–0.792) phonemising the paragraph whole against
+0.792 (0.717–0.811) per sentence. The spread between seeds is wider than the
+gap between approaches. What splitting by sentence does buy is that pauses land
+at sentence ends instead of wherever the token budget ran out, and chunk
+boundaries stop cutting through clauses.
 
-**A typical utterance is about as accurate as v1's** — the medians are level.
-What changed is that the catastrophic failures largely stop: v1 ran past the end
-of the text on 25 of 300 items, repeating itself or drifting into the voice
-prompt's words. v2 does that on zero to one. That, plus noticeably better voice
-cloning, is the difference you hear.
+**Retry a runaway rather than shipping it.** A generation that never emits
+end-of-speech runs to the length cap and repeats itself — `fanAvari` comes back
+as `fanAvariiiiii…`. It is stochastic and a second attempt usually terminates,
+so compare the output against the cap (`tokens / 3.0 + 2.0` seconds) and
+regenerate when it exceeds it. This matters more than how you chunk.
 
-Figures are the mean of three evaluation runs. Single runs of this metric vary
-by up to 0.3 WER, because one runaway generation carries an enormous insertion
-count.
+**Chunk length is the real constraint, not document length.** Training
+utterances averaged about 11 tokens. Nine to sixteen is the clean band, 18 is a
+safe budget, and at 21 and above generations stop terminating. Long documents
+are fine; unbroken text with no sentence structure is not.
 
 ---
 

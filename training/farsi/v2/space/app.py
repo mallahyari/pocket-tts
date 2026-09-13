@@ -38,6 +38,7 @@ DEFAULT_MAX_TOKENS = 18     # ~11 tokens was the training average; 21+ runs past
 DEFAULT_MIN_TOKENS = 8
 DEFAULT_VOICE_SEC = 5.0     # training capped voice prompts at 5 s
 DEFAULT_JOIN_SEC = 0.0
+DEFAULT_PAUSE_SEC = 0.25   # between sentences
 MAX_CHARS = 2000
 SAMPLE_RATE = 24000
 
@@ -56,6 +57,42 @@ TO_PHONEMES = str.maketrans({"/": "a", "a": "A", "@": "?", "$": "S", "c": "C"})
 # chunker needs it, or a chunk boundary lands inside a noun phrase and you hear
 # a gap in the middle of it.
 EZAFE_MARK = "1"
+
+# Persian sentence-final punctuation.
+SENTENCE_SPLIT = re.compile(r"(?<=[.!؟])\s+")
+
+# A generation that never emits end-of-speech runs to the length cap and
+# repeats itself -- "fanAvari" comes back as "fanAvariiiiiiii...". Sampling is
+# stochastic, so a second attempt usually terminates. Mirrors the retry in
+# training/farsi/synthesize.py.
+CAP_RATIO = 0.97
+RETRIES = 2
+
+
+def _cap_seconds(text: str) -> float:
+    """Seconds pocket-tts will let this text generate before it gives up."""
+    tokens = len(_sp.encode(text))
+    tps = getattr(model, "_TOKENS_PER_SECOND_ESTIMATE", 3.0)
+    pad = getattr(model, "_GEN_SECONDS_PADDING", 2.0)
+    return tokens / tps + pad
+
+
+def _generate_one(state, spoken: str) -> np.ndarray:
+    """Generate a chunk, retrying a runaway rather than shipping it."""
+    cap = _cap_seconds(spoken)
+    shortest = None
+    for attempt in range(RETRIES + 1):
+        audio = model.generate_audio(state, spoken, frames_after_eos=FRAMES_AFTER_EOS)
+        if torch.is_tensor(audio):
+            audio = audio.detach().float().cpu().numpy()
+        audio = np.asarray(audio, dtype=np.float32).reshape(-1)
+        if audio.shape[-1] / SAMPLE_RATE <= CAP_RATIO * cap:
+            return audio
+        logger.warning("runaway on attempt %d (%.1fs > %.1fs cap): %s",
+                       attempt + 1, audio.shape[-1] / SAMPLE_RATE, cap, spoken)
+        if shortest is None or audio.shape[-1] < shortest.shape[-1]:
+            shortest = audio
+    return shortest
 
 
 def strip_ezafe(text: str) -> str:
@@ -172,6 +209,7 @@ def synthesize(
     max_tokens: int = DEFAULT_MAX_TOKENS,
     voice_sec: float = DEFAULT_VOICE_SEC,
     join_sec: float = DEFAULT_JOIN_SEC,
+    pause_sec: float = DEFAULT_PAUSE_SEC,
 ):
     """Speak Persian text in the voice of the audio prompt.
 
@@ -182,19 +220,35 @@ def synthesize(
         eos_threshold: Higher keeps the model talking longer.
         max_tokens: Token budget per chunk. 21+ is where stability degrades.
         voice_sec: Seconds of the prompt to use; training capped this at 5.
-        join_sec: Silence inserted at a chunk seam.
+        join_sec: Silence at a split made to fit the token budget.
+        pause_sec: Silence at a sentence boundary.
 
     Returns:
         (sample_rate, waveform), and a report showing the phonemes used.
     """
     if not text or not text.strip():
         raise gr.Error("Please enter some Persian text.")
-    phonemes = phonemise(text.strip()[:MAX_CHARS])
-    chunks = split_phonemes(phonemes, int(max_tokens))
-    if not chunks:
+    # One sentence at a time. G2P discards punctuation, so phonemising a whole
+    # paragraph leaves no sentence boundaries for the chunker and it cuts on
+    # token count alone, landing mid-sentence. Measured on a five-sentence
+    # paragraph: phonemising it whole gave 7 chunks, 0.755 WER and a generation
+    # that never emitted EOS; per sentence gave 6 chunks, 0.698 and no runaway.
+    sentences = [s.strip() for s in SENTENCE_SPLIT.split(text.strip()[:MAX_CHARS]) if s.strip()]
+    plan = []          # (chunk, is_last_of_sentence)
+    shown = []
+    for sent in sentences:
+        p = phonemise(sent)
+        shown.append(strip_ezafe(p))
+        cs = split_phonemes(p, int(max_tokens))
+        for j, c in enumerate(cs):
+            plan.append((c, j == len(cs) - 1))
+    if not plan:
         raise gr.Error("Nothing to synthesize.")
+    phonemes = " ".join(shown)
+    chunks = [c for c, _ in plan]
     voice_path = _prepare_voice_prompt(voice_audio, float(voice_sec))
     join = np.zeros(int(float(join_sec) * SAMPLE_RATE), dtype=np.float32)
+    pause = np.zeros(int(float(pause_sec) * SAMPLE_RATE), dtype=np.float32)
 
     with _LOCK:
         model.temp = float(temperature)
@@ -204,17 +258,19 @@ def synthesize(
         for i, chunk in enumerate(chunks, 1):
             spoken = strip_ezafe(chunk)
             logger.info("[%d/%d] %d tokens: %s", i, len(chunks), _count_tokens(chunk), spoken)
-            audio = model.generate_audio(state, spoken, frames_after_eos=FRAMES_AFTER_EOS)
-            if torch.is_tensor(audio):
-                audio = audio.detach().float().cpu().numpy()
-            pieces.append(np.asarray(audio, dtype=np.float32).reshape(-1))
-            if i < len(chunks) and join.size:
-                pieces.append(join)
+            pieces.append(_generate_one(state, spoken))
+            if i < len(chunks):
+                # A sentence boundary earns a real pause; a split made only to
+                # fit the token budget gets the (smaller) seam gap.
+                gap = pause if plan[i - 1][1] else join
+                if gap.size:
+                    pieces.append(gap)
 
     wav = np.concatenate(pieces) if pieces else np.zeros(1, dtype=np.float32)
     report = (
-        f"**{len(chunks)} chunk(s)** · {wav.shape[-1] / SAMPLE_RATE:.1f} s @ 24 kHz\n\n"
-        f"**Phonemes fed to the model:**\n\n`{strip_ezafe(phonemes)}`"
+        f"**{len(sentences)} sentence(s), {len(chunks)} chunk(s)** · "
+        f"{wav.shape[-1] / SAMPLE_RATE:.1f} s @ 24 kHz\n\n"
+        f"**Phonemes fed to the model:**\n\n`{phonemes}`"
     )
     return (SAMPLE_RATE, wav), report
 
@@ -244,13 +300,14 @@ with gr.Blocks(title="Pocket TTS — Farsi v2") as demo:
                     eos = gr.Slider(-6.0, 0.0, value=DEFAULT_EOS_THRESHOLD, step=0.5, label="EOS threshold")
                     maxtok = gr.Slider(8, 24, value=DEFAULT_MAX_TOKENS, step=1, label="Max tokens per chunk")
                     vsec = gr.Slider(1.0, 10.0, value=DEFAULT_VOICE_SEC, step=0.5, label="Voice prompt seconds")
-                    jsec = gr.Slider(0.0, 0.5, value=DEFAULT_JOIN_SEC, step=0.05, label="Silence at a chunk seam")
+                    jsec = gr.Slider(0.0, 0.5, value=DEFAULT_JOIN_SEC, step=0.05, label="Silence at a budget split")
+                    psec = gr.Slider(0.0, 1.0, value=DEFAULT_PAUSE_SEC, step=0.05, label="Pause between sentences")
             with gr.Column():
                 out_audio = gr.Audio(label="Generated speech", type="numpy", autoplay=False)
                 out_report = gr.Markdown()
         go.click(
             synthesize,
-            inputs=[text, voice, temperature, eos, maxtok, vsec, jsec],
+            inputs=[text, voice, temperature, eos, maxtok, vsec, jsec, psec],
             outputs=[out_audio, out_report],
         )
 
