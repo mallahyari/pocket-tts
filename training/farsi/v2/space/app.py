@@ -177,6 +177,39 @@ def split_phonemes(text: str, max_tokens: int, min_tokens: int = DEFAULT_MIN_TOK
     return out
 
 
+def _trim_silence(a: np.ndarray, keep_ms: float = 120.0) -> np.ndarray:
+    """Cut the silence a generation opens and closes with.
+
+    Chunks are generated independently and each one starts by producing
+    silence -- 0.8 s and 1.3 s on a two-chunk sentence we measured. Joined, the
+    tail of one and the head of the next become an audible hole in the middle
+    of a phrase, and no pause setting controls it because we never inserted it.
+    Trim to the speech and let the requested gap be the only gap.
+
+    The threshold is deliberately very low and a wide `keep_ms` margin is kept
+    on each side. A first pass at 0.15 RMS with 40 ms of margin measured well:
+    it removed the gap entirely. It also ate the opening /b/ of "bebarad" -- a
+    voiced stop is brief and quiet, so the detector skipped it and locked onto
+    the following vowel. Clipping an onset would recreate the
+    missing-first-consonant bug by another route, so err toward leaving silence
+    in.
+    """
+    if a.size == 0:
+        return a
+    rms = float(np.sqrt((a.astype(np.float64) ** 2).mean()))
+    if rms <= 0:
+        return a
+    win = int(0.02 * SAMPLE_RATE)
+    thr = 0.04 * rms
+    loud = [
+        i for i in range(0, max(len(a) - win, 1), win)
+        if np.sqrt((a[i:i + win].astype(np.float64) ** 2).mean()) > thr
+    ]
+    if not loud:
+        return a
+    margin = int(keep_ms / 1000.0 * SAMPLE_RATE)
+    return a[max(0, loud[0] - margin): min(len(a), loud[-1] + win + margin)]
+
 def _prepare_voice_prompt(voice_audio, voice_sec: float) -> str:
     if voice_audio is None:
         return EXAMPLE_VOICE
@@ -258,7 +291,7 @@ def synthesize(
         for i, chunk in enumerate(chunks, 1):
             spoken = strip_ezafe(chunk)
             logger.info("[%d/%d] %d tokens: %s", i, len(chunks), _count_tokens(chunk), spoken)
-            pieces.append(_generate_one(state, spoken))
+            pieces.append(_trim_silence(_generate_one(state, spoken)))
             if i < len(chunks):
                 # A sentence boundary earns a real pause; a split made only to
                 # fit the token budget gets the (smaller) seam gap.

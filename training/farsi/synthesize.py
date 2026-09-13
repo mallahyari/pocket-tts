@@ -84,6 +84,38 @@ def _cap_seconds(model: "TTSModel", text: str) -> float:
     return math.ceil((tokens / tps + pad) * frame_rate) / frame_rate
 
 
+def trim_silence(a: np.ndarray, sample_rate: int, keep_ms: float = 120.0) -> np.ndarray:
+    """Cut the silence a generation opens and closes with.
+
+    Chunks are generated independently and each opens by producing silence --
+    800 ms and 1280 ms on the two chunks of one measured sentence. Concatenated,
+    the tail of one plus the head of the next is an audible hole in the middle
+    of a phrase, and no pause setting controls it because nothing inserted it.
+    Trim to the speech so the requested gap is the only gap.
+
+    Threshold and margin are deliberately generous. A first attempt at 0.15 RMS
+    with 40 ms of margin removed the gap and was still wrong in principle: a
+    voiced stop is brief and quiet, so a detector set that high locks onto the
+    following vowel and eats the consonant. Measured at these settings, speech
+    content changes by 40 ms on a 2.8 s chunk, i.e. window rounding.
+    """
+    if a.size == 0:
+        return a
+    rms = float(np.sqrt((a.astype(np.float64) ** 2).mean()))
+    if rms <= 0:
+        return a
+    win = int(0.02 * sample_rate)
+    thr = 0.04 * rms
+    loud = [
+        i for i in range(0, max(len(a) - win, 1), win)
+        if np.sqrt((a[i:i + win].astype(np.float64) ** 2).mean()) > thr
+    ]
+    if not loud:
+        return a
+    margin = int(keep_ms / 1000.0 * sample_rate)
+    return a[max(0, loud[0] - margin): min(len(a), loud[-1] + win + margin)]
+
+
 def generate_chunk(
     model: "TTSModel",
     state: "ModelState",
@@ -396,8 +428,12 @@ def main(
         spoken = strip_ezafe(chunk)
         logger.info(f"[{i}/{len(chunks)}] {len(sp.encode(spoken))} tokens: {spoken}")
         pieces.append(
-            generate_chunk(
-                model, state, spoken, frames_after_eos=frames_after_eos, sample_rate=sample_rate
+            trim_silence(
+                generate_chunk(
+                    model, state, spoken, frames_after_eos=frames_after_eos,
+                    sample_rate=sample_rate,
+                ),
+                sample_rate,
             )
         )
         if i < len(chunks):

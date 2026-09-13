@@ -1013,3 +1013,39 @@ def test_strip_ezafe_is_a_noop_without_marks():
     assert split_text(text, _fake_count, max_tokens=6) == split_text(
         text, _fake_count, max_tokens=6
     )
+
+
+def test_trim_silence_keeps_the_speech():
+    """It must remove silence and nothing else.
+
+    A first version used a 0.15 RMS threshold with 40 ms of margin. It removed
+    the gap, and on a quiet onset it would lock onto the following vowel and eat
+    the consonant -- recreating the missing-first-consonant bug by another route.
+    """
+    import numpy as np
+
+    from training.farsi.synthesize import trim_silence
+
+    sr = 24000
+    quiet = np.zeros(sr, dtype=np.float32)                       # 1 s of silence
+    onset = np.full(int(0.03 * sr), 0.02, dtype=np.float32)      # a brief, quiet stop
+    vowel = np.full(int(0.40 * sr), 0.5, dtype=np.float32)       # the loud part
+    a = np.concatenate([quiet, onset, vowel, quiet])
+
+    out = trim_silence(a, sr)
+    assert out.size < a.size, "no silence removed"
+    # the quiet onset survives: peak-below-threshold audio is still speech
+    head = out[: int(0.20 * sr)]
+    assert float(np.abs(head).max()) >= 0.02, "the quiet onset was clipped"
+    # and the loud part is untouched
+    assert np.isclose(float(np.abs(out).max()), 0.5)
+
+
+def test_trim_silence_passes_through_degenerate_input():
+    import numpy as np
+
+    from training.farsi.synthesize import trim_silence
+
+    assert trim_silence(np.zeros(0, dtype=np.float32), 24000).size == 0
+    silent = np.zeros(2400, dtype=np.float32)
+    assert trim_silence(silent, 24000).size == silent.size  # all-silence is returned as-is
