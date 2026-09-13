@@ -1,18 +1,88 @@
 # Pocket TTS
 
 > [!TIP]
-> **This fork adds a Farsi (Persian) training pipeline and a finished model.** A
-> 100M-parameter CPU model trained on 497h of public-domain Persian speech, plus
-> everything used to build it — data prep, training, distillation, evaluation.
-> Start with [`training/farsi/RUNBOOK.md`](training/farsi/RUNBOOK.md) for
-> step-by-step instructions, [`training/farsi/RESULTS.md`](training/farsi/RESULTS.md)
-> for the numbers and what was learned, [`training/farsi/examples/`](training/farsi/examples/)
-> to listen to it first, or try the model directly:
-> [🤗 pocket-tts-farsi](https://huggingface.co/mehdi-hf/pocket-tts-farsi).
+> **This fork adds a Farsi (Persian) training pipeline and two finished models.**
+> The current one is **v2**: 109.5M parameters, CPU-only, voice cloning from a
+> five-second prompt, trained on 973 hours of Persian speech from 2,978
+> speakers. Try it on the hub —
+> [🤗 pocket-tts-farsi-v2](https://huggingface.co/mehdi-hf/pocket-tts-farsi-v2)
+> — or read [`training/farsi/v2/RESULTS.md`](training/farsi/v2/RESULTS.md) for
+> the numbers, the wrong turns, and what they cost.
+>
+> v1 ([🤗 pocket-tts-farsi](https://huggingface.co/mehdi-hf/pocket-tts-farsi))
+> is kept for anyone depending on it, along with its
+> [runbook](training/farsi/RUNBOOK.md) and [results](training/farsi/RESULTS.md).
 
-## Farsi examples
+## Farsi v2
 
-Five clips generated with the released model
+Measured on 300 held-out Common Voice pairs — speakers and clips neither model
+ever trained on, scored identically:
+
+| | v1 | **v2** |
+|---|---|---|
+| mean WER | 2.048 | **0.582** |
+| median per-item WER | 0.333 | 0.333 |
+| runaway generations | 25 / 300 | **0–1 / 300** |
+| speaker similarity | 0.764 | **0.859** |
+| UTMOS (naturalness) | 2.826 | **3.11** |
+| training data | 497 h, 1,100 speakers | **973 h, 2,978 speakers** |
+
+A typical utterance is about as accurate in both; the medians are level. What
+changes is that the catastrophic failures stop. v1 runs past the end of the text
+on 25 of 300 items, repeating itself or drifting into the prompt's words. v2
+does that on zero to one.
+
+**v2 takes romanised phonemes, not Persian script.** Persian text passed
+directly produces silence — every character maps to the unknown token and the
+model emits end-of-speech immediately. Phonemise with
+[Homo-GE2PE](https://huggingface.co/mehdi-hf/Homo-GE2PE-Persian-HF) first; the
+[model card](https://huggingface.co/mehdi-hf/pocket-tts-farsi-v2) has the code,
+and [`training/farsi/v2/space/`](training/farsi/v2/space/) is a Gradio app that
+wires the whole pipeline together.
+
+Install note: v2's `model.yaml` sets `capitalize_first_letter`, which the
+released `pocket-tts` rejects as an unknown key ([PR
+#307](https://github.com/kyutai-labs/pocket-tts/pull/307) adds it upstream).
+Until that lands, use this fork:
+
+```bash
+pip install "pocket-tts @ git+https://github.com/mallahyari/pocket-tts@main"
+```
+
+### Speaking more than one sentence
+
+Split the Persian into sentences, phonemise each on its own, synthesise each,
+and join with a pause of about 0.25 s. G2P discards punctuation, so a
+phonemised paragraph has no sentence boundaries left in it and any chunker is
+then cutting on token count alone, landing mid-sentence.
+
+```python
+import re
+sentences = [s.strip() for s in re.split(r"(?<=[.!؟])\s+", article) if s.strip()]
+pieces = [synthesise(phonemise(s)) for s in sentences]
+```
+
+Do this for **prosody, not accuracy**. Measured on a five-sentence paragraph
+over three seeds each, the two routes are indistinguishable on word error rate
+— 0.736 median (0.660–0.792) phonemising the paragraph whole against 0.792
+(0.717–0.811) per sentence, a spread wider than the gap. What it buys is that
+pauses land at sentence ends rather than wherever the token budget ran out.
+
+Two things matter more than how you chunk:
+
+- **Retry a runaway rather than shipping it.** A generation that never emits
+  end-of-speech runs to the length cap and repeats itself — `fanAvari` comes
+  back as `fanAvariiiiii…`. It is stochastic, and a second attempt usually
+  terminates. Compare the output against `tokens / 3.0 + 2.0` seconds and
+  regenerate when it exceeds that.
+- **Chunk length is the constraint, not document length.** Training utterances
+  averaged ~11 tokens. Nine to sixteen is the clean band, 18 is a safe budget,
+  and at 21 and above generations stop terminating. Long documents are fine;
+  unbroken text with no sentence structure is not.
+
+## Farsi v1 examples
+
+Kept for reference. Five clips generated with the **v1** model
 ([mehdi-hf/pocket-tts-farsi](https://huggingface.co/mehdi-hf/pocket-tts-farsi)),
 its one bundled voice, default settings, no cherry-picking or re-takes — what
 you hear is what `farsi_tts.py` or the [Gradio app](training/farsi/space/) gives
