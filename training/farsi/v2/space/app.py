@@ -179,6 +179,48 @@ def split_phonemes(text: str, max_tokens: int, min_tokens: int = DEFAULT_MIN_TOK
             out[i] = f"{prev[-1]} {out[i]}"
     return out
 
+# Clause punctuation. G2P discards it, so the split has to happen on the Persian
+# before phonemising -- by the time we have phonemes there is nothing left to
+# break on and the chunker cuts on token count alone. That is how "az beyn
+# bebarad" got cut in half, stranding the verb at the head of a chunk where the
+# first-position weakness ate it.
+CLAUSE_SPLIT = re.compile(r"(?<=[،؛:])\s+")
+
+
+def plan_sentence(sent: str, max_tokens: int) -> list[tuple[str, str]]:
+    """One sentence -> [(chunk phonemes, boundary kind)].
+
+    Clauses are phonemised separately and packed whole wherever the budget
+    allows, so a comma becomes the chunk boundary rather than wherever the
+    token count happened to run out. Phonemising per clause is not a
+    compromise: on the sentence this was built for it also fixes an ezafe that
+    the whole-sentence pass ran together ("qAbeltavajohi" -> "qAbele
+    tavajjohi").
+    """
+    out: list[tuple[str, str]] = []
+    cur = ""
+    for clause in CLAUSE_SPLIT.split(sent):
+        if not clause.strip():
+            continue
+        p = phonemise(clause)
+        if _count_tokens(p) > max_tokens:
+            if cur:
+                out.append((cur, "clause"))
+                cur = ""
+            parts = split_phonemes(p, max_tokens)
+            out.extend((c, "clause" if j == len(parts) - 1 else "budget")
+                       for j, c in enumerate(parts))
+            continue
+        trial = f"{cur} {p}".strip()
+        if cur and _count_tokens(trial) > max_tokens:
+            out.append((cur, "clause"))
+            cur = p
+        else:
+            cur = trial
+    if cur:
+        out.append((cur, "clause"))
+    return out
+
 
 def _trim_silence(a: np.ndarray, keep_ms: float = 120.0) -> np.ndarray:
     """Cut the silence a generation opens and closes with.
@@ -270,21 +312,20 @@ def synthesize(
     # paragraph: phonemising it whole gave 7 chunks, 0.755 WER and a generation
     # that never emitted EOS; per sentence gave 6 chunks, 0.698 and no runaway.
     sentences = [s.strip() for s in SENTENCE_SPLIT.split(text.strip()[:MAX_CHARS]) if s.strip()]
-    plan = []          # (chunk, is_last_of_sentence)
-    shown = []
+    plan: list[tuple[str, str]] = []      # (chunk, boundary kind after it)
     for sent in sentences:
-        p = phonemise(sent)
-        shown.append(strip_ezafe(p))
-        cs = split_phonemes(p, int(max_tokens))
-        for j, c in enumerate(cs):
-            plan.append((c, j == len(cs) - 1))
+        cs = plan_sentence(sent, int(max_tokens))
+        if cs:
+            plan.extend(cs[:-1])
+            plan.append((cs[-1][0], "sentence"))
     if not plan:
         raise gr.Error("Nothing to synthesize.")
-    phonemes = " ".join(shown)
     chunks = [c for c, _ in plan]
+    phonemes = " ".join(strip_ezafe(c) for c in chunks)
     voice_path = _prepare_voice_prompt(voice_audio, float(voice_sec))
     join = np.zeros(int(float(join_sec) * SAMPLE_RATE), dtype=np.float32)
     pause = np.zeros(int(float(pause_sec) * SAMPLE_RATE), dtype=np.float32)
+    clause_gap = np.zeros(int(0.5 * (float(pause_sec) + float(join_sec)) * SAMPLE_RATE), dtype=np.float32)
 
     with _LOCK:
         model.temp = float(temperature)
@@ -296,9 +337,9 @@ def synthesize(
             logger.info("[%d/%d] %d tokens: %s", i, len(chunks), _count_tokens(chunk), spoken)
             pieces.append(_trim_silence(_generate_one(state, spoken)))
             if i < len(chunks):
-                # A sentence boundary earns a real pause; a split made only to
-                # fit the token budget gets the (smaller) seam gap.
-                gap = pause if plan[i - 1][1] else join
+                # Three levels: a sentence earns the longest pause, a comma a
+                # shorter one, a split made only to fit the budget the shortest.
+                gap = {"sentence": pause, "clause": clause_gap}.get(plan[i - 1][1], join)
                 if gap.size:
                     pieces.append(gap)
 
